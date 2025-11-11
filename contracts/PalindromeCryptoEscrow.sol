@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity 0.8.29;
 
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// PalindromeCryptoEscrow: Secure, production-grade escrow contract with gas/human-readable error optimizations
-contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
+
+/// @notice Secure, production-grade escrow contract for P2P crypto settlement.
+/// @dev This contract handles the creation and management of escrow deals, ensuring secure transactions between buyers and sellers with the involvement of an arbiter.
+contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     using ECDSA for bytes32;
+    using SafeERC20 for IERC20;
 
     enum State { AWAITING_PAYMENT, AWAITING_DELIVERY, DISPUTED, COMPLETE, REFUNDED, CANCELED }
     enum Role { None, Buyer, Seller, Arbiter }
 
-    uint256 public constant FEE_BPS = 100; // 1%
+    uint256 private constant _FEE_BPS = 100; // 1%
 
     struct EscrowDeal {
         address token;
@@ -23,18 +27,22 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         uint256 amount;
         uint256 depositTime;
         uint256 maturityTime;
+        uint256 nonce; 
         State state;
         bool buyerCancelRequested;
         bool sellerCancelRequested;
-        uint256 nonce; // for replay protection
     }
 
     uint256 public nextEscrowId;
-    mapping(uint256 => EscrowDeal) public escrows;
-    mapping(address => bool) public allowedTokens;
-    mapping(uint256 => uint256) public disputeStatus;
 
-    address private immutable cachedThis = address(this);
+    mapping(uint256 escrowId => EscrowDeal) public escrows;
+    mapping(address tokenAddress => bool isAllowed) public allowedTokens;
+    mapping(uint256 _disputeId => uint256 _status) public disputeStatus;
+    mapping(address token => mapping(address user => uint256 amount)) public withdrawable;
+    mapping(address token => uint256 amount) public feeWithdrawable;
+
+
+    error InvalidMessageRoleForDispute();
 
     // ---- Events ----
     event TokenAllowed(address indexed token, bool allowed);
@@ -58,39 +66,67 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
     event DisputeResolved(uint256 indexed escrowId, State resolution, address arbiter, uint256 amount, uint256 fee);
     event Refunded(uint256 indexed escrowId, address indexed initiator, uint256 amount, uint256 fee);
     event DisputeMessagePosted(uint256 indexed escrowId, address indexed sender, uint256 indexed role, string ipfsHash, uint256 disputeStatus);
+    event Withdrawn(address indexed token, address indexed user, uint256 amount);
+    event FeeWithdrawn(address indexed token, address indexed to, uint256 amount);
+    event PayoutWithFee(address indexed token, address indexed recipient, uint256 amount, uint256 fee);
 
-    // ---- Modifiers ----
+    /// @notice Ensures that the caller is a participant in the specified escrow
+    /// @param escrowId The ID of the escrow to check participant status
     modifier onlyParticipant(uint256 escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        require(msg.sender == deal.buyer || msg.sender == deal.seller, "Not a participant in escrow");
-        _;
-    }
+            require(msg.sender == escrows[escrowId].buyer || msg.sender == escrows[escrowId].seller || msg.sender == escrows[escrowId].arbiter, "Not a participant in escrow") ;
+    _;
+    }   
 
+    /// @notice Ensures that the function can only be called by the buyer or seller of the specified escrow
+    /// @param escrowId The ID of the escrow to check participant status
+    modifier onlyBuyerorSeller(uint256 escrowId) {
+            require(msg.sender == escrows[escrowId].buyer || msg.sender == escrows[escrowId].seller, "Not a buyer or seller in escrow") ;
+    _;
+    }   
+
+    /// @notice Ensures that the caller is the buyer of the specified escrow
+    /// @param escrowId The ID of the escrow to check the buyer for
     modifier onlyBuyer(uint256 escrowId) {
-        require(msg.sender == escrows[escrowId].buyer, "Caller is not the buyer");
+        require(msg.sender == escrows[escrowId].buyer, "Only buyer allowed");
         _;
     }
 
+    /// @notice Ensures that the caller is the seller of the specified escrow
+    /// @param escrowId The ID of the escrow for which the caller must be the seller
+    modifier onlySeller(uint256 escrowId) {
+        require(msg.sender == escrows[escrowId].seller, "Only seller allowed");
+        _;
+    }
+
+    // @notice Ensures that the caller is the arbiter for the specified escrow
+    // @param escrowId The ID of the escrow for which the caller must be the arbiter
     modifier onlyArbiter(uint256 escrowId) {
-        require(msg.sender == escrows[escrowId].arbiter, "Caller is not the arbiter");
+        require(msg.sender == escrows[escrowId].arbiter, "Only arbiter allowed");
         _;
     }
 
-    // ---- Constructor ----
+
+    /**
+    * @notice Initializes contract and sets initial allowed token.
+    * @param initialAllowedToken The address of the first allowed ERC20 token.
+    */
     constructor(address initialAllowedToken) {
-        require(initialAllowedToken != address(0), "Initial token address cannot be zero");
+        require(initialAllowedToken != address(0), "Address cannot be zero");
         allowedTokens[initialAllowedToken] = true;
         emit TokenAllowed(initialAllowedToken, true);
     }
 
-    // ---- Owner functions ----
-    function setAllowedToken(address token, bool allowed) external payable onlyOwner {
-        require(token != address(0), "Token cannot be zero address");
-        allowedTokens[token] = allowed;
-        emit TokenAllowed(token, allowed);
-    }
-
-    // ---- Escrow functions ----
+    /**
+       @notice Any user may create an escrow as seller. Access is intentionally 
+     * @dev Creates a new escrow deal with the specified parameters.
+     * @param token The address of the token to be used in the escrow.
+     * @param buyer The address of the buyer in the escrow.
+     * @param amount The amount of tokens involved in the escrow.
+     * @param maturityTimeDays The number of days until the escrow matures.
+     * @param title A title for the escrow deal.
+     * @param ipfsHash An IPFS hash for additional metadata.
+     * @return The ID of the newly created escrow.
+     */
     function createEscrow(
         address token,
         address buyer,
@@ -102,11 +138,13 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         require(token != address(0), "Token cannot be zero address");
         require(allowedTokens[token], "Token is not whitelisted/allowed");
         require(buyer != address(0), "Buyer cannot be zero address");
-        require(buyer != msg.sender, "Buyer and seller cannot be the same");
+        require(buyer != msg.sender, "Buyer and seller same");
         require(maturityTimeDays < 3651, "Maturity exceeds 3650 days");
-        require(amount > 0, "Amount must be greater than zero");
+        require(amount != 0, "Amount not greater zero");
 
-        EscrowDeal storage deal = escrows[nextEscrowId];
+        uint256 escrowId = nextEscrowId; // cache in memory/stack
+        escrowId = nextEscrowId;
+        EscrowDeal storage deal = escrows[escrowId];
         deal.token = token;
         deal.buyer = buyer;
         deal.seller = msg.sender;
@@ -120,7 +158,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         deal.nonce = 0;
 
         emit EscrowCreated(
-            nextEscrowId,
+            escrowId,
             buyer,
             msg.sender,
             token,
@@ -130,87 +168,169 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
             title,
             ipfsHash
         );
-        nextEscrowId++;
-        return nextEscrowId - 1;
+        nextEscrowId = escrowId + 1; 
+        return escrowId;
     }
 
-    // --- Internal safe ERC20 transfers with clear errors ---
-    function _safeTransfer(address token, address to, uint256 amount) internal {
-        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
-        require(success, "ERC20 transfer failed");
-        if (data.length > 0) require(abi.decode(data, (bool)), "ERC20 transfer did not return true");
-    }
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) internal {
-        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, amount));
-        require(success, "ERC20 transferFrom failed");
-        if (data.length > 0) require(abi.decode(data, (bool)), "ERC20 transferFrom did not return true");
-    }
-
-    // --- Escrow payout calculation and transfer ---
-    function _escrowPayoutWithFee(address token, address to, uint256 amount) internal returns (uint256 fee) {
-        fee = (amount * FEE_BPS) / 10000;
+    /**
+     * @notice Handles the payout with a fee deduction for a given token and recipient.
+     * @dev Handles the payout process with a fee deduction. 
+     * Calculates the fee based on the provided amount and updates the withdrawable balances.
+     * Emits a PayoutWithFee event.
+     * @param token The address of the token being paid out.
+     * @param recipient The address of the recipient.
+     * @param amount The total amount to be paid out before fee deduction.
+     * @return fee The fee deducted from the total amount.
+     */
+    function _escrowPayoutWithFee(address token, address recipient, uint256 amount) internal returns (uint256 fee) {
+        require(recipient != address(0), "Recipient address cannot be zero");
+        fee = (amount * _FEE_BPS) / 10000;
         uint256 payout = amount - fee;
-        uint256 beforeBal = IERC20(token).balanceOf(cachedThis);
-        if (fee > 0) _safeTransfer(token, owner(), fee);
-        _safeTransfer(token, to, payout);
-        uint256 afterBal = IERC20(token).balanceOf(cachedThis);
-        require(beforeBal - afterBal == amount, "Payout not consistent with transfer");
+        require(amount != 0, "Amount must be greater than zero");
+        withdrawable[token][recipient] += payout;
+        feeWithdrawable[token] = feeWithdrawable[token] + fee;
+        emit PayoutWithFee(token, recipient, amount, fee);
     }
 
+    /**
+     * @notice Allows the buyer or seller to withdraw their funds from the escrow.
+     * @dev Allows the buyer or seller to withdraw their funds from the escrow.
+     * @param escrowId The ID of the escrow deal.
+     * Requirements:
+     * - The caller must be the buyer or seller of the escrow.
+     * - There must be a non-zero amount available to withdraw.
+     */
+    function withdraw(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
+        EscrowDeal storage deal = escrows[escrowId];
+        require(deal.state == State.CANCELED || deal.state == State.COMPLETE || deal.state == State.REFUNDED, "Withdrawals only allowed after escrow ends");
+        uint256 amount = withdrawable[deal.token][msg.sender];
+        require(amount != 0, "Nothing to withdraw");
+        IERC20(deal.token).safeTransfer(msg.sender, amount);
+        delete withdrawable[deal.token][msg.sender];
+        emit Withdrawn(deal.token, msg.sender, amount);
+    }
+
+
+
+    /**
+     * @notice Withdraws the accumulated fees for a specific token to a specified address.
+     * @dev Withdraws the accumulated fees for a specific token to a specified address.
+     * @param token The address of the token from which fees are to be withdrawn.
+     * @param to The address to which the withdrawn fees will be sent.
+     * Requirements:
+     * - The caller must be the contract owner.
+     * - There must be fees available to withdraw.
+     */
+    function withdrawFee(address token, address to) external nonReentrant onlyOwner {
+        require(to != address(0), "Invalid fee recipient"); // <--- Recommended addition
+        uint256 amount = feeWithdrawable[token];
+        require(amount != 0, "No fees to withdraw");
+        IERC20(token).safeTransfer(to, amount);
+        delete feeWithdrawable[token];
+        emit FeeWithdrawn(token, to, amount);
+    }
+
+
+    /**
+     * @notice Deposits the specified amount into the escrow for the given escrowId.
+     * @dev Deposits the specified amount of tokens into the escrow.
+     * The function requires the escrow to be in the AWAITING_PAYMENT state and the token to be allowed.
+     * It checks the allowance and ensures the transfer amount matches the expected deposit.
+     * Updates the escrow state to AWAITING_DELIVERY upon successful deposit.
+     * Emits a PaymentDeposited event.
+     * @param escrowId The ID of the escrow deal.
+     */
     function deposit(uint256 escrowId) external nonReentrant onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_PAYMENT, "Escrow must be awaiting payment");
-        require(IERC20(deal.token).allowance(msg.sender, cachedThis) >= deal.amount, "Escrow: allowance too low");
-
-        uint256 balBefore = IERC20(deal.token).balanceOf(cachedThis);
-        _safeTransferFrom(deal.token, msg.sender, cachedThis, deal.amount);
-        uint256 balAfter = IERC20(deal.token).balanceOf(cachedThis);
+        require(deal.state == State.AWAITING_PAYMENT, "Not AWAITING_PAYMENT");
+        require(allowedTokens[deal.token], "Token not allowed anymore");
+        require(IERC20(deal.token).allowance(msg.sender, address(this)) > deal.amount - 1, "Escrow: allowance too low");
+        uint256 balBefore = IERC20(deal.token).balanceOf(address(this));
+        IERC20(deal.token).safeTransferFrom(msg.sender, address(this), deal.amount);
+        uint256 balAfter = IERC20(deal.token).balanceOf(address(this));
         require(balAfter - balBefore == deal.amount, "Deposit mismatch after transfer");
-
         deal.depositTime = block.timestamp;
         deal.state = State.AWAITING_DELIVERY;
         emit PaymentDeposited(escrowId, msg.sender, deal.amount);
     }
 
+    /**
+     * @notice Confirms the delivery of the escrow and completes the transaction.
+     * @dev Confirms the delivery of the escrowed item, changes the state to COMPLETE, 
+     * and processes the payout with a fee to the seller.
+     * @param escrowId The ID of the escrow deal to confirm delivery for.
+     */
     function confirmDelivery(uint256 escrowId) external nonReentrant onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow not awaiting delivery");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         uint256 fee = _escrowPayoutWithFee(deal.token, deal.seller, deal.amount);
         deal.state = State.COMPLETE;
         emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee);
     }
 
-    function autoRelease(uint256 escrowId) external nonReentrant {
+
+    /**
+     * @notice Automatically releases the escrow funds to the seller if the maturity time has been reached.
+     * @param escrowId The ID of the escrow deal to be released.
+     * @dev Automatically releases the escrow amount to the seller if the maturity time has been reached.
+     * Requirements:
+     * - The escrow must be in the AWAITING_DELIVERY state.
+     * - The deposit time and maturity time must be set.
+     * - The current block timestamp must be greater than the deposit time plus the maturity period.
+     * - Only the seller can call this function.
+     * - The function is protected against reentrancy.
+     */
+    function autoRelease(uint256 escrowId) external nonReentrant onlySeller(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow not in active delivery state");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         require(deal.depositTime != 0, "Deposit time not set");
         require(deal.maturityTime != 0, "Maturity not configured");
-        require(block.timestamp >= deal.depositTime + (deal.maturityTime * 1 days), "Maturity time not yet reached");
+        require(block.timestamp > deal.depositTime + (deal.maturityTime * 1 days), "Maturity time not yet reached");
         uint256 fee = _escrowPayoutWithFee(deal.token, deal.seller, deal.amount);
         deal.state = State.COMPLETE;
         emit AutoReleased(escrowId, deal.seller, deal.amount, fee);
     }
 
-    function requestCancel(uint256 escrowId) external nonReentrant onlyParticipant(escrowId) {
-        EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Cancelation only allowed after deposit");
-        if (msg.sender == deal.buyer) {
-            deal.buyerCancelRequested = true;
-        } else {
-            deal.sellerCancelRequested = true;
-        }
-        emit RequestCancel(escrowId, msg.sender);
 
-        if (deal.buyerCancelRequested && deal.sellerCancelRequested) {
-            uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
-            deal.state = State.CANCELED;
-            emit Canceled(escrowId, msg.sender, deal.amount, fee);
+    /**
+     * @notice Allows the buyer or seller to request the cancellation of an escrow if both parties agree.
+     * @dev Allows the buyer or seller to request a cancellation of the escrow.
+     * The function checks if both parties have requested cancellation and processes it if true.
+     * Emits a RequestCancel event and, if both parties agree, a Canceled event.
+     * @param escrowId The ID of the escrow to be canceled.
+     */
+    function requestCancel(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
+        EscrowDeal storage deal = escrows[escrowId];
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
+        (msg.sender == deal.buyer) ? deal.buyerCancelRequested = true : deal.sellerCancelRequested = true;
+        emit RequestCancel(escrowId, msg.sender);
+        /// @notice Handles the cancellation of a deal when both buyer and seller have requested it
+        /// @dev Calculates the fee and updates the deal state to CANCELED
+        if (deal.buyerCancelRequested) {
+            if (deal.sellerCancelRequested) {
+                uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
+                deal.state = State.CANCELED;
+                emit Canceled(escrowId, msg.sender, deal.amount, fee);
+            }
         }
     }
 
-    function cancelByTimeout(uint256 escrowId) external nonReentrant {
+    
+    /**
+     * @notice Cancels the escrow by timeout if conditions are met.
+     * @dev Cancels an escrow by timeout if the maturity period has been reached.
+     * Requirements:
+     * - The escrow must be in the AWAITING_DELIVERY state.
+     * - The buyer must have requested cancellation.
+     * - The seller must not have requested cancellation.
+     * - A deposit must have been made.
+     * - A maturity time must be set.
+     * - The current time must be greater than the deposit time plus the maturity period.
+     * Emits a {Canceled} event.
+     */
+    function cancelByTimeout(uint256 escrowId) external nonReentrant onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow not in active delivery state");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         require(deal.buyerCancelRequested, "Buyer must request cancellation");
         require(!deal.sellerCancelRequested, "Mutual cancel already processed");
         require(deal.depositTime != 0, "Deposit not made");
@@ -221,37 +341,71 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         emit Canceled(escrowId, msg.sender, deal.amount, fee);
     }
 
-    function startDispute(uint256 escrowId) external nonReentrant onlyParticipant(escrowId) {
+
+    /**
+     * @notice Initiates a dispute for the specified escrow deal if it is in the delivery phase.
+     * @dev Initiates a dispute for the specified escrow deal.
+     * Can only be called by the buyer when the deal is in the delivery phase.
+     * Changes the state of the deal to DISPUTED and emits a DisputeStarted event.
+     * @param escrowId The ID of the escrow deal to dispute.
+     */
+    function startDispute(uint256 escrowId) external nonReentrant onlyBuyer(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Dispute can only be started in delivery phase");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         deal.state = State.DISPUTED;
         emit DisputeStarted(escrowId, msg.sender);
     }
 
-    function submitDisputeMessage(uint256 escrowId, Role role, string calldata ipfsHash) external nonReentrant {
+    /**
+     * @notice Submits a dispute message for a specific escrow by the designated role.
+     * @dev Submits a dispute message for a given escrow by the specified role.
+     * The function ensures that only the designated participant (buyer, seller, or arbiter)
+     * can submit a message for the disputed escrow. It also checks that a message
+     * has not already been submitted for the role.
+     * @param escrowId The ID of the escrow.
+     * @param role The role of the participant submitting the message.
+     * @param ipfsHash The IPFS hash of the dispute message.
+     */
+    function submitDisputeMessage(uint256 escrowId, Role role, string calldata ipfsHash) external nonReentrant onlyParticipant(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.DISPUTED, "Escrow not in disputed state");
+        require(deal.state == State.DISPUTED, "Not DISPUTED");
         uint256 mask;
+        /// @notice Checks if the sender is the buyer and sets the mask accordingly
         if (role == Role.Buyer) {
-            require(msg.sender == deal.buyer, "Only buyer may submit this message");
+            require(msg.sender == deal.buyer, "Only buyer can message");
             mask = uint256(1) << 0;
+        /// @notice Checks if the sender is the seller and sets the appropriate mask
+        /// @dev This block ensures only the seller can submit a message 
         } else if (role == Role.Seller) {
-            require(msg.sender == deal.seller, "Only seller may submit this message");
+            require(msg.sender == deal.seller, "Only seller can message");
             mask = uint256(1) << 1;
+        /// @notice Checks if the sender is the arbiter and sets the mask for the arbiter role
+        /// @dev This block ensures only the arbiter can submit a message and sets the appropriate mask
         } else if (role == Role.Arbiter) {
-            require(msg.sender == deal.arbiter, "Only arbiter may submit message");
+            require(msg.sender == deal.arbiter, "Only arbiter can message");
             mask = uint256(1) << 2;
+        /// @notice Reverts the transaction if the message role is invalid for dispute
+        /// @dev This scope block handles invalid message roles by 
         } else {
-            revert("Invalid message role for dispute");
+            revert InvalidMessageRoleForDispute();
         }
-        require((disputeStatus[escrowId] & mask) == 0, "Already submitted message for role");
+        require((disputeStatus[escrowId] & mask) == 0, "Already submitted message");
         disputeStatus[escrowId] |= mask;
         emit DisputeMessagePosted(escrowId, msg.sender, uint256(role), ipfsHash, disputeStatus[escrowId]);
     }
 
-    function resolveDispute(uint256 escrowId, State resolution) external payable nonReentrant onlyArbiter(escrowId) {
+    /**
+     * @notice Resolves a dispute for a given escrow by setting its state to the specified resolution.
+     * @dev Resolves a dispute for a given escrow by setting its state to the provided resolution.
+     * Only callable by the arbiter of the escrow. The resolution must be either COMPLETE or REFUNDED.
+     * Transfers the escrow amount to the appropriate party and deletes the dispute status.
+     * Emits a DisputeResolved event.
+     * @param escrowId The ID of the escrow to resolve.
+     * @param resolution The resolution state to set for the escrow.
+     */
+    function resolveDispute(uint256 escrowId, State resolution) external nonReentrant onlyArbiter(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.DISPUTED, "Escrow not in dispute");
+        require(deal.state == State.DISPUTED, "Not DISPUTED");
         require(resolution == State.COMPLETE || resolution == State.REFUNDED, "Invalid resolution");
         address target = resolution == State.COMPLETE ? deal.seller : deal.buyer;
         uint256 fee = _escrowPayoutWithFee(deal.token, target, deal.amount);
@@ -260,28 +414,58 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
     }
 
-    function refund(uint256 escrowId) external payable nonReentrant onlyArbiter(escrowId) {
+    /**
+     * @notice Refunds the buyer and updates the escrow state to REFUNDED
+     * @dev Refunds the buyer in an escrow deal if the state is AWAITING_DELIVERY.
+     * The function can only be called by the arbiter and is protected against reentrancy.
+     * It updates the state to REFUNDED and emits a Refunded event.
+     * @param escrowId The ID of the escrow deal to refund.
+     */
+    function refund(uint256 escrowId) external nonReentrant onlyArbiter(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Only refundable from delivery state");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
         deal.state = State.REFUNDED;
         emit Refunded(escrowId, msg.sender, deal.amount, fee);
     }
 
-    // --- Signature-based actions (Meta-tx) ---
+    /**
+     * @notice Confirms the delivery of an item in escrow by verifying the buyer's signature.
+     * @param escrowId The ID of the escrow deal.
+     * @param signature The signature of the buyer.
+     * @param deadline The deadline for the signature validity.
+     * @param nonce The nonce used for the signature.
+     * @dev Confirms the delivery of an escrow deal by verifying the buyer's signature.
+     * The function checks the validity of the deadline, nonce, and signature.
+     * It updates the escrow state to COMPLETE and processes the payout with a fee.
+     * Emits a DeliveryConfirmed event upon successful confirmation.
+     */
 
     function confirmDeliverySigned(
         uint256 escrowId,
         bytes calldata signature,
         uint256 deadline,
         uint256 nonce
-    ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
+    ) external nonReentrant onlyBuyer(escrowId) {
+        uint256 MAX_SIGNATURE_WINDOW = 1 days;
+        require(deadline > 0, "Invalid deadline");
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow not awaiting delivery");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         require(nonce == deal.nonce, "Invalid nonce for signature");
+
         bytes32 hash = keccak256(
-            abi.encodePacked(address(this), escrowId, deal.buyer, deal.depositTime, nonce, deadline, "confirmDelivery")
+            abi.encode(
+                block.chainid,
+                address(this),
+                escrowId,
+                deal.buyer,
+                deal.depositTime,
+                deadline,
+                nonce,
+                "confirmDelivery"
+            )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(signer == deal.buyer, "Invalid buyer signature");
@@ -291,76 +475,162 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee);
     }
 
+    /**
+     * @notice Requests the cancellation of an escrow deal.
+     * @dev Verifies the signature and ensures both buyer and seller have requested cancellation.
+     * @param escrowId The ID of the escrow deal.
+     * @param deadline The deadline for the cancellation request.
+     * @param signature The signature of the request.
+     * @param nonce The nonce to prevent replay attacks.
+     */
     function requestCancelSigned(
         uint256 escrowId,
-        address participant,
         uint256 deadline,
         bytes calldata signature,
         uint256 nonce
-    ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
+    ) external nonReentrant onlyBuyerorSeller(escrowId){
+        uint256 MAX_SIGNATURE_WINDOW = 1 days;
+        require(deadline > 0, "Invalid deadline");
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow not in delivery state");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_DELIVERY");
         require(nonce == deal.nonce, "Nonce mismatch");
-        require(participant == deal.buyer || participant == deal.seller, "Participant must be buyer or seller");
+
         bytes32 hash = keccak256(
-            abi.encodePacked(address(this), escrowId, participant, deal.depositTime, deadline, nonce, "cancelRequest")
+            abi.encode(
+                block.chainid,
+                address(this),
+                escrowId,
+                msg.sender, 
+                deal.depositTime,
+                deadline,
+                nonce,
+                "cancelRequest"
+            )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
-        require(signer == participant, "Signature does not match participant");
+
+        require(
+            (signer == deal.buyer && msg.sender == deal.buyer) ||
+            (signer == deal.seller && msg.sender == deal.seller),
+            "Signature participant mismatch"
+        );
+
         deal.nonce++;
-        if (participant == deal.buyer) deal.buyerCancelRequested = true;
+        if (signer == deal.buyer) deal.buyerCancelRequested = true;
         else deal.sellerCancelRequested = true;
-        emit RequestCancel(escrowId, participant);
-        if (deal.buyerCancelRequested && deal.sellerCancelRequested) {
-            uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
-            deal.state = State.CANCELED;
-            emit Canceled(escrowId, participant, deal.amount, fee);
+
+        emit RequestCancel(escrowId, signer);
+        /// @notice Handles the cancellation of a deal when both buyer and seller have requested it.
+        /// @dev Calculates the fee and updates the deal state to CANCELED.
+        if (deal.buyerCancelRequested) {
+            if (deal.sellerCancelRequested) {
+                uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
+                deal.state = State.CANCELED;
+                emit Canceled(escrowId, msg.sender, deal.amount, fee);
+            }
         }
     }
 
+    /** 
+     * @notice Initiates a dispute for the specified escrow if conditions are met.
+     * @dev Initiates a dispute for an escrow transaction. The function can only be called by the buyer.
+     * The dispute must be started within a valid signature window and the nonce must match the current deal nonce.
+     * The signer of the signature must be either the buyer or the seller.
+     * @param escrowId The ID of the escrow transaction.
+     * @param deadline The deadline by which the dispute must be initiated.
+     * @param signature The signature of the buyer or seller.
+     * @param nonce The current nonce of the escrow deal.
+     */
     function startDisputeSigned(
         uint256 escrowId,
-        address participant,
         uint256 deadline,
         bytes calldata signature,
         uint256 nonce
-    ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
+    ) external nonReentrant onlyBuyer(escrowId){
+        uint256 MAX_SIGNATURE_WINDOW = 1 days;
+        require(deadline > 0, "Invalid deadline");
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow must be in delivery for dispute");
-        require(nonce == deal.nonce, "Nonce mismatch for dispute");
-        require(participant == deal.buyer || participant == deal.seller, "Invalid participant for dispute");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_PAYMENT");
+        require(nonce == deal.nonce, "Nonce mismatch");
+
         bytes32 hash = keccak256(
-            abi.encodePacked(address(this), escrowId, participant, deal.depositTime, deadline, nonce, "startDispute")
+            abi.encode(
+                block.chainid,
+                address(this),
+                escrowId,
+                deal.depositTime,
+                deadline,
+                nonce,
+                "startDispute"
+            )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
-        require(signer == participant, "Signature does not match participant for dispute");
+        require(signer == deal.buyer, "Signature must be buyer");
         deal.nonce++;
         deal.state = State.DISPUTED;
-        emit DisputeStarted(escrowId, participant);
+        emit DisputeStarted(escrowId, signer);
     }
 
+    /**
+     * @notice Refunds the escrow amount to the buyer if the conditions are met and the signature is valid.
+     * @param escrowId The ID of the escrow.
+     * @param deadline The deadline for the refund to be valid.
+     * @param signature The signature to verify the refund.
+     * @param nonce The nonce to ensure the refund is unique.
+     * @dev Refunds the escrow amount to the buyer if the conditions are met.
+     * The function can only be called by the arbiter and requires a valid signature.
+     * It checks the escrow state, deadline, and nonce before proceeding with the refund.
+     * Emits a `Refunded` event upon successful refund.
+     */
     function refundSigned(
         uint256 escrowId,
         uint256 deadline,
         bytes calldata signature,
         uint256 nonce
-    ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
+    ) external nonReentrant onlyBuyer(escrowId) {
+        uint256 MAX_SIGNATURE_WINDOW = 1 days;
+        require(deadline > 0, "Invalid deadline");
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
         EscrowDeal storage deal = escrows[escrowId];
-        require(deal.state == State.AWAITING_DELIVERY, "Escrow must be in delivery to refund");
+        require(deal.state == State.AWAITING_DELIVERY, "Not AWAITING_PAYMENT");
         require(nonce == deal.nonce, "Refund nonce mismatch");
+
         bytes32 hash = keccak256(
-            abi.encodePacked(address(this), escrowId, deal.arbiter, deal.depositTime, deadline, nonce, "refund")
+            abi.encode(
+                block.chainid,
+                address(this),
+                escrowId,
+                deal.depositTime,
+                deadline,
+                nonce,
+                "refund"
+            )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(signer == deal.arbiter, "Signature does not match arbiter");
         deal.nonce++;
         uint256 fee = _escrowPayoutWithFee(deal.token, deal.buyer, deal.amount);
         deal.state = State.REFUNDED;
-        emit Refunded(escrowId, deal.arbiter, deal.amount, fee);
+        emit Refunded(escrowId, signer, deal.amount, fee);
     }
+
+    /** 
+     * @notice Resolves a dispute for a given escrow by verifying the arbiter's signature and updating the escrow state.
+     * @dev Resolves a dispute for a given escrow by verifying the arbiter's signature.
+     * The function checks the validity of the deadline, nonce, and resolution type.
+     * It ensures the signature matches the arbiter's and updates the escrow state accordingly.
+     * Emits a DisputeResolved event upon successful resolution.
+     * @param escrowId The ID of the escrow in dispute.
+     * @param resolution The desired resolution state (COMPLETE or REFUNDED).
+     * @param deadline The deadline by which the resolution must be signed.
+     * @param signature The arbiter's signature for the resolution.
+     * @param nonce The nonce to ensure the resolution is unique.
+     */
 
     function resolveDisputeSigned(
         uint256 escrowId,
@@ -368,14 +638,27 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         uint256 deadline,
         bytes calldata signature,
         uint256 nonce
-    ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
+    ) external nonReentrant onlyArbiter(escrowId){
+        uint256 MAX_SIGNATURE_WINDOW = 1 days;
+        require(deadline > 0, "Invalid deadline");
+        require(deadline > block.timestamp, "Deadline must be in the future");
+        require(deadline < block.timestamp + MAX_SIGNATURE_WINDOW, "Deadline exceeds maximum window");
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.DISPUTED, "Not in dispute state");
         require(nonce == deal.nonce, "Nonce mismatch for dispute resolve");
         require(resolution == State.COMPLETE || resolution == State.REFUNDED, "Resolution type invalid");
+
         bytes32 hash = keccak256(
-            abi.encodePacked(address(this), escrowId, deal.arbiter, deal.depositTime, deadline, nonce, "resolveDispute", resolution)
+            abi.encode(
+                block.chainid,
+                address(this),
+                escrowId,
+                deal.depositTime,
+                deadline,
+                nonce,
+                "resolveDispute",
+                resolution
+            )
         );
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(signer == deal.arbiter, "Signature does not match arbiter");
@@ -384,6 +667,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable {
         uint256 fee = _escrowPayoutWithFee(deal.token, target, deal.amount);
         delete disputeStatus[escrowId];
         deal.state = resolution;
-        emit DisputeResolved(escrowId, resolution, deal.arbiter, deal.amount, fee);
+        emit DisputeResolved(escrowId, resolution, signer, deal.amount, fee);
     }
 }

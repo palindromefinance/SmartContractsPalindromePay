@@ -15,10 +15,13 @@ A Solidity smart contract and TypeScript test suite for robust ERC20-based escro
 
 ---
 
-### 1. Install dependencies: npm install
+### 1. Install dependencies: 
+npm install
 
-### 2. Compile: npx hardhat compile
+### 2. Compile: 
+npx hardhat compile
 
-### 2. Test: npx hardhat test
+### 2. Test: 
+npx hardhat test
 
 
