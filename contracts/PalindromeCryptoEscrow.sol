@@ -73,6 +73,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     event FeeWithdrawn(address indexed token, address indexed to, uint256 amount);
     event PayoutWithFee(address indexed token, address indexed recipient, uint256 amount, uint256 fee);
     event FeeWithdrawnAll(address indexed owner, uint256 lpBurned);
+    event EscrowArbiterChanged(uint256 indexed escrowId, address oldArbiter, address newArbiter);
 
     /// @notice Ensures that the caller is a participant in the specified escrow
     /// @param escrowId The ID of the escrow to check participant status
@@ -237,7 +238,18 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         }
         lpToken.burn(owner(), lpBurnAmount);
         emit FeeWithdrawnAll(owner(), lpBurnAmount);
+    }
 
+    /**
+    * @notice Allows the contract owner to change arbiter of a specific escrow
+    * @dev Useful for compliance upgrades, governance, and dispute assignment
+    */
+    function setEscrowArbiter(uint256 escrowId, address newArbiter) external onlyOwner {
+        require(newArbiter != address(0), "New arbiter cannot be zero address");
+        EscrowDeal storage deal = escrows[escrowId];
+        address oldArbiter = deal.arbiter;
+        deal.arbiter = newArbiter;
+        emit EscrowArbiterChanged(escrowId, oldArbiter, newArbiter);
     }
 
     /**

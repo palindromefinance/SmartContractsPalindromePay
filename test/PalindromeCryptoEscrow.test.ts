@@ -2,23 +2,21 @@
  * ===============================
  *   ESCROW CONTRACT TEST COVERAGE
  * ===============================
- * This test suite comprehensively covers the core and advanced business logic
- * of the PalindromeCryptoEscrow smart contract, including all critical payout scenarios 
- * for both the buyer, seller, and protocol fee recipient.
- * Covered Scenarios:
- *  - Buyer deposit and escrow funding flow
- *  - Delivery confirmation and seller withdrawal
- *  - Meta-transaction delivery (off-chain signature, relayed execution)
- *  - Protocol fee collection and owner fee withdrawal
- *  - Mutual cancel and cancelByTimeout logic, including buyer withdrawal
- *  - Dispute flow and both possible paths (COMPLETE to seller, REFUNDED to buyer)
- *  - Withdrawal logic for both buyer and seller
- *  - Double withdrawal attempts revert (no double-claim)
- *  - Withdrawal for zero-balance reverts (no empty pay)
- *  - Protocol fee double-withdrawal reverts
- *  - Role-based access enforcement for payout/withdraw paths
+ * This suite tests all critical flows for PalindromeCryptoEscrow, validating secure P2P escrow, meta-transaction signing, protocol fees, and advanced dispute scenarios.
  *
- * (c) 2025 Palindrome Finance - QA Reference
+ * Covered Scenarios:
+ *  - Buyer deposits and funds escrow successfully.
+ *  - Delivery confirmation and seller withdrawal via both direct and meta-tx signatures.
+ *  - Protocol fee accrual with LP token minting and secure owner withdrawal (withdrawAllFees).
+ *  - Mutual cancel and cancelByTimeout: both immediate (mutual) and delayed (by maturity/timeout).
+ *  - Seller autoRelease after escrow maturity, validating time-dependent payout.
+ *  - Arbiter/owner issues refunds both directly and via off-chain meta-transaction.
+ *  - Secure dispute opening (buyer/seller only), meta-tx and direct, with resolution to both seller (COMPLETE) and buyer (REFUNDED) paths.
+ *  - Only authorized roles can withdraw, dispute, resolve, or cancel; unauthorized access tests revert as expected.
+ *  - Negative tests: replay prevention via strict nonce handling, invalid/deadline signature reverts, double-withdrawal and double-cancel blocked.
+ *  - All meta-tx methods (confirmDeliverySigned, startDisputeSigned, resolveDisputeSigned, requestCancelSigned) covered, validating replay, role, and security guarantees.
+ *
+ * (c) 2025 Palindrome Finance - Automated Test Suite Reference
  */
 
 
@@ -324,6 +322,75 @@ test('mutual cancel triggers withdrawal for buyer', async () => {
     });
     assert.equal(Number(buyerAfter), 0, "Buyer withdrawable zero after claiming cancel funds");
 });
+
+test('autoRelease allows seller to release funds after maturity', async () => {
+    // Setup: Create and fund an escrow with maturity period
+    const MATURITY_DAYS = 1n; // 1 day
+    const id = await setupDeal(AMOUNT, MATURITY_DAYS);
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id]
+    });
+
+    // Fast-forward time past maturity
+    let deal = await getDeal(id);
+    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n) + 10;
+    await increaseTime(fastForwardSeconds);
+
+    // Seller calls autoRelease, should succeed
+    await sellerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'autoRelease',
+        args: [id]
+    });
+
+    // Confirm state transition to COMPLETE
+    deal = await getDeal(id);
+    assert.equal(deal[8], State.COMPLETE, "Escrow should be COMPLETE after autoRelease");
+});
+
+
+test('cancelByTimeout allows buyer to cancel if seller does not respond after maturity', async () => {
+    // Setup: Create/fund escrow with maturity and request cancel only from buyer
+    const MATURITY_DAYS = 1n; // 1 day
+    const id = await setupDeal(AMOUNT, MATURITY_DAYS);
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id]
+    });
+
+    // Buyer requests cancel
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'requestCancel',
+        args: [id]
+    });
+
+    // Fast-forward time past maturity
+    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n) + 10;
+    await increaseTime(fastForwardSeconds);
+
+    // Buyer calls cancelByTimeout, should succeed
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'cancelByTimeout',
+        args: [id]
+    });
+
+    // Confirm state transition to CANCELED
+    const deal = await getDeal(id);
+    assert.equal(deal[8], State.CANCELED, "Escrow should be CANCELED after cancelByTimeout");
+});
+
 
 test('buyer or seller can start dispute only in AWAITING_DELIVERY', async () => {
     // Setup
