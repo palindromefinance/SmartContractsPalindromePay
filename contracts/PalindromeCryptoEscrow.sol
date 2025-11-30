@@ -55,6 +55,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     mapping(uint256 escrowId => Nonces) public escrowsNonces; 
     mapping(bytes32 => bool) public usedSignatures;
     mapping(address => bool) public authorizedRelayers;
+    mapping(uint256 => bool) public arbiterDecisionSubmitted;
 
     error InvalidMessageRoleForDispute();
     error InvalidState();
@@ -470,13 +471,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         } else if (role == Role.Seller) {
             require(msg.sender == deal.seller, "Only seller can message");
             mask = uint256(1) << 1;
-        /// @notice Checks if the sender is the arbiter and sets the mask for the arbiter role
-        /// @dev This block ensures only the arbiter can submit a message and sets the appropriate mask
-        } else if (role == Role.Arbiter) {
-            require(msg.sender == deal.arbiter, "Only arbiter can message");
-            mask = uint256(1) << 2;
-        /// @notice Reverts the transaction if the message role is invalid for dispute
-        /// @dev This scope block handles invalid message roles by 
         } else {
             revert InvalidMessageRoleForDispute();
         }
@@ -500,13 +494,13 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     */
     function submitArbiterDecision(uint256 escrowId, State resolution, string calldata ipfsHash) 
         external nonReentrant onlyArbiter(escrowId) {
+        
         EscrowDeal storage deal = escrows[escrowId];
         if (deal.state != State.DISPUTED) revert InvalidState();
         if (resolution != State.COMPLETE && resolution != State.REFUNDED) revert InvalidState();
 
-        uint256 evidenceMask = 0x03; // Buyer(1) + Seller(2)
+        uint256 evidenceMask = 0x03;
         uint256 actualEvidence = disputeStatus[escrowId] & evidenceMask;
-        
         bool fullEvidence = (actualEvidence == evidenceMask);
         bool minEvidence = (actualEvidence > 0);
         bool shortTimeout = (block.timestamp > deal.disputeStartTime + DISPUTE_SHORT_TIMEOUT);
@@ -519,24 +513,22 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             revert("Require full evidence or 7-day timeout");
         }
 
-        uint256 arbiterMask = 0x04;
-        if ((disputeStatus[escrowId] & arbiterMask) != 0) {
-            revert ArbiterMessageAlreadyPosted();
-        }
-        disputeStatus[escrowId] |= arbiterMask;
+        require(!arbiterDecisionSubmitted[escrowId], "Decision already submitted");
 
+        disputeStatus[escrowId] |= 0x04;  
         emit DisputeMessagePosted(escrowId, msg.sender, uint256(Role.Arbiter), ipfsHash, disputeStatus[escrowId]);
 
-        // ... rest unchanged
-
+        arbiterDecisionSubmitted[escrowId] = true;
 
         bool applyFee = (resolution == State.COMPLETE);
         address target = applyFee ? deal.seller : deal.buyer;
+        
         delete disputeStatus[escrowId];
         uint256 fee = _escrowPayout(escrowId, deal.token, target, deal.amount, applyFee);
         deal.state = resolution;
         emit DisputeResolved(escrowId, resolution, msg.sender, deal.amount, fee);
     }
+
 
 
 
@@ -556,7 +548,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         bytes calldata signature,
         uint256 deadline,
         uint256 nonce
-    ) external nonReentrant {
+    ) external nonReentrant onlyBuyer(escrowId){
         uint256 MAX_SIGNATURE_WINDOW = 1 days;
         require(deadline > 0, "Invalid deadline");
         require(deadline > block.timestamp, "Deadline must be in the future");
@@ -576,8 +568,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             )
         );
 
-        require(!usedSignatures[hash], "Signature already used");
-        usedSignatures[hash] = true;
+        bytes32 rawSigHash = keccak256(signature);  // ← NEW LINE
+        require(!usedSignatures[rawSigHash], "Signature already used");  
+        usedSignatures[rawSigHash] = true; 
 
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(msg.sender == deal.buyer && signer == deal.buyer, "Only buyer can confirm");
@@ -622,8 +615,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             )
         );
 
-        require(!usedSignatures[hash], "Signature already used");
-        usedSignatures[hash] = true;
+        bytes32 rawSigHash = keccak256(signature);
+        require(!usedSignatures[rawSigHash], "Signature already used");
+        usedSignatures[rawSigHash] = true;
 
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(signer != address(0), "Invalid signature"); 
@@ -687,8 +681,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             )
         );
 
-        require(!usedSignatures[hash], "Signature already used");
-        usedSignatures[hash] = true;
+        bytes32 rawSigHash = keccak256(signature);
+        require(!usedSignatures[rawSigHash], "Signature already used");
+        usedSignatures[rawSigHash] = true;
 
         address signer = ECDSA.recover(hash.toEthSignedMessageHash(), signature);
         require(signer != address(0), "Invalid signature"); 
