@@ -113,7 +113,7 @@ const chainIdNumber: number = await getChainId(publicClient);
 const chainId: bigint = BigInt(chainIdNumber);
 
 
-const AMOUNT = 1_000_000n;
+const AMOUNT = 10_000_000n;
 
 
 const State = {

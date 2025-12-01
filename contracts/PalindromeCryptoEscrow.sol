@@ -19,6 +19,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     uint256 public constant DISPUTE_SHORT_TIMEOUT = 7 days;
     uint256 public constant DISPUTE_LONG_TIMEOUT = 30 days;
     uint256 public constant TIMEOUT_BUFFER = 1 hours;
+    uint256 public constant TOKEN_DECIMAL = 6;
 
     struct EscrowDeal {
         address token;
@@ -246,6 +247,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(buyer != address(0), "Buyer cannot be zero address");
         require(buyer != msg.sender, "Buyer and seller cannot be same");
         require(amount > 0, "Amount must be > 0");
+        require(amount >= 10 * 10**TOKEN_DECIMAL, "Minimum escrow is $10");
         require(maturityTimeDays < 3651, "Max 10 years");
         require(arbiter != address(0), "Arbiter must be specified");
         require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
@@ -578,20 +580,16 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 deadline,
         uint256 nonce
     ) external nonReentrant {
-        // 1. Signature time window (1 day max)
         uint256 MAX_WINDOW = 1 days;
         require(deadline > block.timestamp, "Expired signature");
         require(deadline <= block.timestamp + MAX_WINDOW, "Invalid deadline window");
         
-        // 2. Load escrow and validate state
         EscrowDeal storage deal = escrows[escrowId];
         require(deal.state == State.AWAITING_DELIVERY, "Invalid state");
         
-        // 3. Nonce validation (prevents replay even if sig changes)
         uint256 expectedNonce = _getRoleNonce(escrowId, deal.buyer, deal);
         require(nonce == expectedNonce, "Invalid nonce");
         
-        // 4. Domain-separated message hash (EIP-712 style protection)
         bytes32 structHash = keccak256(
             abi.encode(
                 block.chainid,
@@ -608,15 +606,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             )
         );
         
-        // 5. Anti-malleability + replay protection
         _useSignature(signature);
         
-        // 6. Signature recovery and authorization
         address signer = ECDSA.recover(structHash.toEthSignedMessageHash(), signature);
         require(signer == deal.buyer, "Unauthorized signer");
         require(signer != address(0), "Invalid recovery");
         
-        // 7. Atomic state transition + payout
         _incrementRoleNonce(escrowId, signer, deal);
         uint256 fee = _escrowPayout(escrowId, deal.token, deal.seller, deal.amount, true);
         deal.state = State.COMPLETE;
