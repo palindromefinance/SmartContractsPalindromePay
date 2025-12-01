@@ -20,6 +20,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     uint256 public constant DISPUTE_LONG_TIMEOUT = 30 days;
     uint256 public constant TIMEOUT_BUFFER = 1 hours;
     uint256 public constant TOKEN_DECIMAL = 6;
+    uint256 constant GRACE_PERIOD = 6 hours;
+    uint256 constant BLOCKS_PER_DAY = 7200; 
 
     struct EscrowDeal {
         address token;
@@ -33,7 +35,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         State state;
         bool buyerCancelRequested;
         bool sellerCancelRequested;
-        uint256 actualAmount;    
         bool buyerWithdrawn;    
         bool sellerWithdrawn; 
     }
@@ -54,6 +55,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     mapping(uint256 escrowId => Nonces) public escrowsNonces; 
     mapping(bytes32 => bool) public usedSignatures;
     mapping(uint256 => bool) public arbiterDecisionSubmitted;
+    mapping(uint256 => uint256) public escrowDepositBlock;
 
     error InvalidMessageRoleForDispute();
     error InvalidState();
@@ -88,6 +90,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     event EscrowArbiterChanged(uint256 indexed escrowId, address oldArbiter, address newArbiter);
     event FeesWithdrawn(address indexed token, address indexed to, uint256 amount);
     event PayoutProcessed(uint256 indexed escrowId, address indexed recipient, uint256 netAmount, uint256 fee);
+    event EscrowStateChanged(uint256 indexed escrowId, State oldState, State newState);
 
     /// @notice Ensures that the caller is a participant in the specified escrow
     /// @param escrowId The ID of the escrow to check participant status
@@ -262,8 +265,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         deal.arbiter = arbiter;
         deal.amount = amount;
         deal.maturityTime = block.timestamp + (maturityTimeDays * 1 days); 
-        deal.state = State.AWAITING_PAYMENT;
-        deal.actualAmount = 0;     
+        deal.state = State.AWAITING_PAYMENT;  
         deal.buyerWithdrawn = false; 
         deal.sellerWithdrawn = false; 
 
@@ -304,11 +306,18 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
 
         uint256 netAmount;
         if (applyFee && _FEE_BPS > 0) {
-            feeTaken = applyFee ? (amount * _FEE_BPS) / 10_000 : 0;
+
+            feeTaken = (amount * _FEE_BPS + 9999) / 10_000; 
+            
+            uint256 minFee = 10 ** (TOKEN_DECIMAL - 2);
+            if (feeTaken < minFee && amount >= 10 * 10**TOKEN_DECIMAL) {
+                feeTaken = minFee;
+            }
+            
             netAmount = amount - feeTaken;
-            require(netAmount > 0 || !applyFee, "Dust payout");
+            require(netAmount > 0, "Dust payout");
             withdrawable[escrowId][recipient] += netAmount;
-            feePool[token] += feeTaken; 
+            feePool[token] += feeTaken;
         } else {
             netAmount = amount;
             withdrawable[escrowId][recipient] += netAmount;
@@ -324,7 +333,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
     */
     function withdraw(uint256 escrowId) external nonReentrant onlyBuyerorSeller(escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
+        State oldState = deal.state;
         
+        require(deal.state != State.WITHDRAWN, "Already withdrawn");
         require(
             deal.state == State.CANCELED ||
             deal.state == State.COMPLETE ||
@@ -351,6 +362,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         
         if (withdrawable[escrowId][deal.buyer] == 0 && withdrawable[escrowId][deal.seller] == 0) {
             deal.state = State.WITHDRAWN;
+            emit EscrowStateChanged(escrowId, oldState, State.WITHDRAWN);
         }
         
         IERC20(deal.token).safeTransfer(msg.sender, amount);        
@@ -390,11 +402,10 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 balanceAfter = IERC20(deal.token).balanceOf(address(this));
 
         uint256 actualReceived = balanceAfter - balanceBefore;
-        if (actualReceived != deal.amount) {  // ← CHANGE: Reject fees
+        if (actualReceived != deal.amount) { 
             revert("Fee-on-transfer tokens not supported");
         }
 
-        deal.actualAmount = actualReceived;  
         deal.amount = actualReceived;      
         deal.depositTime = block.timestamp;
         deal.state = State.AWAITING_DELIVERY;
@@ -459,14 +470,13 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(deal.buyerCancelRequested, "Buyer must request cancellation");
         require(!deal.sellerCancelRequested, "Mutual cancel already processed");
         require(deal.depositTime != 0, "Deposit not made");
-        require(block.timestamp > deal.maturityTime, "Maturity period not reached");
+        require(block.timestamp > deal.maturityTime + GRACE_PERIOD, "Grace period not reached");
 
         _escrowPayout(escrowId, deal.token, deal.buyer, deal.amount, false);
         deal.state = State.CANCELED;
 
         emit Canceled(escrowId, msg.sender, deal.amount);
     }
-
     /**
      * @notice Initiates a dispute for the specified escrow deal if it is in the delivery phase.
      * @dev Initiates a dispute for the specified escrow deal.
@@ -589,6 +599,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         
         uint256 expectedNonce = _getRoleNonce(escrowId, deal.buyer, deal);
         require(nonce == expectedNonce, "Invalid nonce");
+        require(deal.arbiter != address(0), "Invalid arbiter");
+        require(deal.arbiter.code.length == 0, "Arbiter must be EOA");
         
         bytes32 structHash = keccak256(
             abi.encode(
@@ -598,6 +610,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 escrowId,
                 deal.buyer,
                 deal.seller,
+                deal.arbiter, 
                 deal.token,
                 deal.amount,
                 deal.depositTime,
@@ -650,6 +663,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         // 4. Nonce validation for caller's role
         uint256 expectedNonce = _getRoleNonce(escrowId, msg.sender, deal);
         require(nonce == expectedNonce, "Invalid nonce");
+        require(deal.arbiter != address(0), "Invalid arbiter");
+        require(deal.arbiter.code.length == 0, "Arbiter must be EOA");
         
         // 5. Domain-separated message hash
         bytes32 structHash = keccak256(
@@ -660,6 +675,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 escrowId,
                 deal.buyer,
                 deal.seller,
+                deal.arbiter,
                 deal.token,
                 deal.amount,
                 deal.depositTime,
@@ -728,6 +744,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         // 3. Nonce validation for caller's role
         uint256 expectedNonce = _getRoleNonce(escrowId, msg.sender, deal);
         require(nonce == expectedNonce, "Invalid nonce");
+        require(deal.arbiter != address(0), "Invalid arbiter");
+        require(deal.arbiter.code.length == 0, "Arbiter must be EOA");
         
         // 4. Domain-separated message hash
         bytes32 structHash = keccak256(
@@ -738,6 +756,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 escrowId,
                 deal.buyer,
                 deal.seller,
+                deal.arbiter,
                 deal.token,
                 deal.amount,
                 deal.depositTime,

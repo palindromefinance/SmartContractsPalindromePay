@@ -219,6 +219,7 @@ function buildMessageHash(
     escrowId: number,
     buyer: Address,
     seller: Address,
+    arbiter: Address,
     token: Address,
     amount: bigint,
     depositTime: bigint,
@@ -227,16 +228,17 @@ function buildMessageHash(
     selector: `0x${string}`
 ): `0x${string}` {
     const abiParams = parseAbiParameters(
-        'uint256, address, bytes4, uint256, address, address, address, uint256, uint256, uint256, uint256'
+        'uint256, address, bytes4, uint256, address, address, address, address, uint256, uint256, uint256, uint256'
     );
 
-    const values: readonly [bigint, `0x${string}`, `0x${string}`, bigint, `0x${string}`, `0x${string}`, `0x${string}`, bigint, bigint, bigint, bigint] = [
+    const values: readonly [bigint, `0x${string}`, `0x${string}`, bigint, `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`, bigint, bigint, bigint, bigint] = [
         chainId,
         escrowAddress,
         selector,
         BigInt(escrowId),
         buyer,
         seller,
+        arbiter,
         token,
         amount,
         depositTime,
@@ -336,6 +338,7 @@ test('mutual cancel triggers withdrawal for buyer', async () => {
 
 test('cancelByTimeout allows buyer to cancel if seller does not respond after maturity', async () => {
     const MATURITY_DAYS = 1n;
+    const GRACE_PERIOD = 86400n;
     const id = await setupDeal(AMOUNT, MATURITY_DAYS);
 
     await buyerClient.writeContract({
@@ -353,7 +356,7 @@ test('cancelByTimeout allows buyer to cancel if seller does not respond after ma
         args: [id]
     });
 
-    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n) + 10;
+    const fastForwardSeconds = Number(MATURITY_DAYS * 86400n + GRACE_PERIOD + 10n);
     await increaseTime(fastForwardSeconds);
 
     await buyerClient.writeContract({
@@ -518,11 +521,11 @@ test('meta transaction: signature replay is blocked by nonce', async () => {
         functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
         args: [id]
     }) as bigint;
-
-    const depositTime = deal[5] as bigint;
-    const seller = deal[2];
     const buyer = deal[1];
+    const seller = deal[2];
+    const arbiter = deal[3];
     const amount = deal[4] as bigint;
+    const depositTime = deal[5] as bigint;
 
     const hash = buildMessageHash(
         chainId,
@@ -530,6 +533,7 @@ test('meta transaction: signature replay is blocked by nonce', async () => {
         id,
         buyer,
         seller,
+        arbiter,
         tokenAddress,
         amount,
         depositTime,
@@ -606,10 +610,11 @@ test('meta transaction: invalid signature is rejected', async () => {
     let deal = await getDeal(id);
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
 
-    const depositTime = deal[5] as bigint;
-    const seller = deal[2];
     const buyer = deal[1];
+    const seller = deal[2];
+    const arbiter = deal[3];
     const amount = deal[4] as bigint;
+    const depositTime = deal[5] as bigint;
 
     const hash = buildMessageHash(
         chainId,
@@ -617,6 +622,7 @@ test('meta transaction: invalid signature is rejected', async () => {
         id,
         buyer,
         seller,
+        arbiter,
         tokenAddress,
         amount,
         depositTime,
@@ -652,10 +658,11 @@ test('meta transaction: deadline too early is rejected', async () => {
         args: [id]
     }) as bigint;
 
-    const depositTime = deal[5] as bigint;
-    const seller = deal[2];
     const buyer = deal[1];
+    const seller = deal[2];
+    const arbiter = deal[3];
     const amount = deal[4] as bigint;
+    const depositTime = deal[5] as bigint;
 
     const hash = buildMessageHash(
         chainId,
@@ -663,6 +670,7 @@ test('meta transaction: deadline too early is rejected', async () => {
         id,
         buyer,
         seller,
+        arbiter,
         tokenAddress,
         amount,
         depositTime,
@@ -764,10 +772,11 @@ test('meta-tx: startDisputeSigned allows relayed dispute by buyer signature', as
         args: [id]
     }) as bigint;
 
-    const depositTime = deal[5] as bigint;
-    const seller = deal[2];
     const buyer = deal[1];
+    const seller = deal[2];
+    const arbiter = deal[3];
     const amount = deal[4] as bigint;
+    const depositTime = deal[5] as bigint;
 
     const hash = buildMessageHash(
         chainId,
@@ -775,6 +784,7 @@ test('meta-tx: startDisputeSigned allows relayed dispute by buyer signature', as
         id,
         buyer,
         seller,
+        arbiter,
         tokenAddress,
         amount,
         depositTime,
@@ -829,10 +839,11 @@ test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signat
         args: [id]
     }) as bigint;
 
-    const depositTime = deal[5] as bigint;
-    const seller = deal[2];
     const buyer = deal[1];
+    const seller = deal[2];
+    const arbiter = deal[3];
     const amount = deal[4] as bigint;
+    const depositTime = deal[5] as bigint;
 
     const hash = buildMessageHash(
         chainId,
@@ -840,6 +851,7 @@ test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signat
         id,
         buyer,
         seller,
+        arbiter,
         tokenAddress,
         amount,
         depositTime,
