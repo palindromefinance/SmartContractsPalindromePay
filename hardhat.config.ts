@@ -22,7 +22,8 @@ const config: HardhatUserConfig = {
       production: {
         version: "0.8.29",
         settings: {
-          optimizer: { enabled: true, runs: 200 }
+          optimizer: { enabled: true, runs: 200 },
+          viaIR: true
         }
       }
     }
