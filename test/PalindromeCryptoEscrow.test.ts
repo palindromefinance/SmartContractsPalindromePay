@@ -9,7 +9,7 @@
  * 📋 FEATURE COVERAGE MATRIX
  *
  * ┌──────────────────────┬──────────────────────────────┬────────────────────┬─────────────────────────────┬──────────────────────────────┬──────────────────────────────┬──────────────────────┬──────────┐
- * │ FEATURE              │ HAPPY PATH                   │ META-TX            │ AUTH GUARD                  │ NEGATIVE SCENARIOS           │ EDGE CASES                   │ TIMEOUT / TIMELOCK   │ STATUS   │
+ * │ FEATURE              │ HAPPY PATH                   │ META-TX EIP-712    │ AUTH GUARD                  │ NEGATIVE SCENARIOS           │ EDGE CASES                   │ TIMEOUT / TIMELOCK   │ STATUS   │
  * ├──────────────────────┼──────────────────────────────┼────────────────────┼─────────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────┼──────────┤
  * │ Create Escrow        │ ✓ createEscrow               │                    │ ✓ Invalid arbiter           │ ✓ Zero amount                │ ✓ Max maturity               │                      │ 100%    │
  * │ Deposit              │ ✓ Full deposit flow          │                    │ ✓ Only buyer                │ ✓ Fee-on-transfer tokens     │ ✓ Allowlist check            │                      │ 100%    │
@@ -63,30 +63,23 @@ import {
     createPublicClient,
     createWalletClient,
     http,
-    keccak256,
-    encodeAbiParameters, parseAbiParameters, encodePacked, Address,
-    WalletClient
+    Address,
 } from 'viem';
-
-
-
 import { foundry } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
-import EscrowArtifact from '../artifacts/contracts/PalindromeCryptoEscrow.sol/PalindromeCryptoEscrow.json' with { type: "json" };
-import USDTArtifact from '../artifacts/contracts/USDT.sol/USDT.json' with { type: "json" };
+import EscrowArtifact from '../artifacts/contracts/PalindromeCryptoEscrow.sol/PalindromeCryptoEscrow.json' with { type: 'json' };
+import USDTArtifact from '../artifacts/contracts/USDT.sol/USDT.json' with { type: 'json' };
 import { getChainId } from 'viem/actions';
-
 
 const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8545';
 const buyerKey = process.env.BUYER_KEY as `0x${string}`;
 const sellerKey = process.env.SELLER_KEY as `0x${string}`;
 const ownerKey = process.env.OWNER_KEY as `0x${string}`;
 
-if (!rpcUrl) throw new Error("RPC_URL env var is missing!");
-if (!buyerKey) throw new Error("BUYER_KEY env var is missing!");
-if (!sellerKey) throw new Error("SELLER_KEY env var is missing!");
-if (!ownerKey) throw new Error("OWNER_KEY env var is missing!");
-
+if (!rpcUrl) throw new Error('RPC_URL env var is missing!');
+if (!buyerKey) throw new Error('BUYER_KEY env var is missing!');
+if (!sellerKey) throw new Error('SELLER_KEY env var is missing!');
+if (!ownerKey) throw new Error('OWNER_KEY env var is missing!');
 
 const CHAIN = foundry;
 
@@ -99,7 +92,6 @@ const buyerClient = createWalletClient({ account: buyer, chain: CHAIN, transport
 const sellerClient = createWalletClient({ account: seller, chain: CHAIN, transport: http(rpcUrl) });
 const ownerClient = createWalletClient({ account: owner, chain: CHAIN, transport: http(rpcUrl) });
 
-
 const tokenAbi = USDTArtifact.abi;
 const tokenBytecode = USDTArtifact.bytecode as `0x${string}`;
 const escrowAbi = EscrowArtifact.abi;
@@ -108,13 +100,10 @@ const escrowBytecode = EscrowArtifact.bytecode as `0x${string}`;
 let tokenAddress: `0x${string}`;
 let escrowAddress: `0x${string}`;
 
-
 const chainIdNumber: number = await getChainId(publicClient);
 const chainId: bigint = BigInt(chainIdNumber);
 
-
 const AMOUNT = 10_000_000n;
-
 
 const State = {
     AWAITING_PAYMENT: 0,
@@ -126,12 +115,11 @@ const State = {
     WITHDRAWN: 6,
 } as const;
 
-
 const Role = {
     None: 0n,
     Buyer: 1n,
     Seller: 2n,
-    Arbiter: 3n
+    Arbiter: 3n,
 } as const;
 
 before(async () => {
@@ -141,18 +129,18 @@ before(async () => {
     const tokenTxHash = await ownerClient.deployContract({
         abi: tokenAbi,
         bytecode: tokenBytecode,
-        args: ["Tether USD", "USDT", initialSupply],
+        args: ['Tether USD', 'USDT', initialSupply],
         account: owner.address,
         chain: CHAIN,
     });
     tokenAddress = (await publicClient.waitForTransactionReceipt({ hash: tokenTxHash })).contractAddress!;
 
-    // FUND OWNER FIRST (critical fix)
+    // FUND OWNER FIRST
     await ownerClient.writeContract({
         address: tokenAddress,
         abi: tokenAbi,
         functionName: 'transfer',
-        args: [owner.address, initialSupply]
+        args: [owner.address, initialSupply],
     });
 
     // Deploy escrow
@@ -167,18 +155,19 @@ before(async () => {
 });
 
 // ------ Utility Helpers ----------
+
 async function fundAndApprove(amount: bigint = AMOUNT) {
     await ownerClient.writeContract({
         address: tokenAddress,
         abi: tokenAbi,
         functionName: 'transfer',
-        args: [buyer.address, amount]
+        args: [buyer.address, amount],
     });
     await buyerClient.writeContract({
         address: tokenAddress,
         abi: tokenAbi,
         functionName: 'approve',
-        args: [escrowAddress, amount]
+        args: [escrowAddress, amount],
     });
 }
 
@@ -187,9 +176,9 @@ async function createEscrow(amount: bigint = AMOUNT, maturityDays: bigint = 0n) 
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrow',
-        args: [tokenAddress, buyer.address, amount, maturityDays, owner.address, "Escrow title", "QmHash"],
+        args: [tokenAddress, buyer.address, amount, maturityDays, owner.address, 'Escrow title', 'QmHash'],
         chain: CHAIN,
-        account: seller
+        account: seller,
     });
 }
 
@@ -198,93 +187,165 @@ async function createEscrowAndDeposit(amount: bigint = AMOUNT, maturityDays: big
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'createEscrowAndDeposit',
-        args: [tokenAddress, seller.address, amount, maturityDays, owner.address, "Escrow title", "QmHash"],
+        args: [tokenAddress, seller.address, amount, maturityDays, owner.address, 'Escrow title', 'QmHash'],
         chain: CHAIN,
-        account: buyer
+        account: buyer,
     });
 }
-
 
 async function setupDeal(amount = AMOUNT, maturityDays = 0n): Promise<number> {
     await fundAndApprove(amount);
     await createEscrow(amount, maturityDays);
-    const nextId = Number(await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'nextEscrowId'
-    }));
+    const nextId = Number(
+        await publicClient.readContract({
+            address: escrowAddress,
+            abi: escrowAbi,
+            functionName: 'nextEscrowId',
+        }),
+    );
     return nextId - 1;
 }
+
 async function setupDealCreateEscrowAndDeposit(amount = AMOUNT, maturityDays = 0n): Promise<number> {
     await fundAndApprove(amount);
     await createEscrowAndDeposit(amount, maturityDays);
-    const nextId = Number(await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'nextEscrowId'
-    }));
+    const nextId = Number(
+        await publicClient.readContract({
+            address: escrowAddress,
+            abi: escrowAbi,
+            functionName: 'nextEscrowId',
+        }),
+    );
     return nextId - 1;
 }
 
-const selectors = {
-    confirmDelivery: (`0x${keccak256(encodePacked(["string"], ["confirmDeliverySigned(uint256,bytes,uint256,uint256)"])).slice(2, 10)}`) as `0x${string}`,
-    requestCancel: (`0x${keccak256(encodePacked(["string"], ["requestCancelSigned(uint256,bytes,uint256,uint256)"])).slice(2, 10)}`) as `0x${string}`,
-    startDispute: (`0x${keccak256(encodePacked(["string"], ["startDisputeSigned(uint256,bytes,uint256,uint256)"])).slice(2, 10)}`) as `0x${string}`,
-    resolveDispute: (`0x${keccak256(encodePacked(["string"], ["resolveDisputeSigned(uint256,bytes,uint8,uint256,uint256)"])).slice(2, 10)}`) as `0x${string}`
+// EIP-712 domain & types 
+function getDomain() {
+    if (!escrowAddress) throw new Error('escrowAddress not set');
+    return {
+        name: 'PalindromeCryptoEscrow',
+        version: '1',
+        chainId,
+        verifyingContract: escrowAddress,
+    } as const;
+}
+
+const types = {
+    ConfirmDelivery: [
+        { name: 'escrowId', type: 'uint256' },
+        { name: 'buyer', type: 'address' },
+        { name: 'seller', type: 'address' },
+        { name: 'arbiter', type: 'address' },
+        { name: 'token', type: 'address' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'depositTime', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+    ],
+    RequestCancel: [
+        { name: 'escrowId', type: 'uint256' },
+        { name: 'buyer', type: 'address' },
+        { name: 'seller', type: 'address' },
+        { name: 'arbiter', type: 'address' },
+        { name: 'token', type: 'address' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'depositTime', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+    ],
+    StartDispute: [
+        { name: 'escrowId', type: 'uint256' },
+        { name: 'buyer', type: 'address' },
+        { name: 'seller', type: 'address' },
+        { name: 'arbiter', type: 'address' },
+        { name: 'token', type: 'address' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'depositTime', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+    ],
 } as const;
 
-
-function buildMessageHash(
-    chainId: bigint,
-    escrowAddress: Address,
-    escrowId: number,
-    buyer: Address,
-    seller: Address,
-    arbiter: Address,
-    token: Address,
-    amount: bigint,
-    depositTime: bigint,
-    deadline: bigint,
-    nonce: bigint,
-    selector: `0x${string}`
-): `0x${string}` {
-    const abiParams = parseAbiParameters(
-        'uint256, address, bytes4, uint256, address, address, address, address, uint256, uint256, uint256, uint256'
-    );
-
-    const values: readonly [bigint, `0x${string}`, `0x${string}`, bigint, `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`, bigint, bigint, bigint, bigint] = [
-        chainId,
-        escrowAddress,
-        selector,
-        BigInt(escrowId),
-        buyer,
-        seller,
-        arbiter,
-        token,
-        amount,
-        depositTime,
+async function signConfirmDeliveryTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint) {
+    const message = {
+        escrowId: BigInt(escrowId),
+        buyer: deal[1] as Address,
+        seller: deal[2] as Address,
+        arbiter: deal[3] as Address,
+        token: tokenAddress,
+        amount: deal[4] as bigint,
+        depositTime: deal[5] as bigint,
         deadline,
-        nonce
-    ];
+        nonce,
+    } as const;
 
-    const encoded = encodeAbiParameters(abiParams, values);
-    return keccak256(encoded);
+    return buyerClient.signTypedData({
+        account: deal[1] as Address,
+        domain: getDomain(),
+        types,
+        primaryType: 'ConfirmDelivery',
+        message,
+    });
 }
 
-async function sign(participantClient: WalletClient, account: Address, hash: `0x${string}`) {
-    return await participantClient.signMessage({ account, message: { raw: hash } });
+async function signStartDisputeTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint, signer: 'buyer' | 'seller') {
+    const message = {
+        escrowId: BigInt(escrowId),
+        buyer: deal[1] as Address,
+        seller: deal[2] as Address,
+        arbiter: deal[3] as Address,
+        token: tokenAddress,
+        amount: deal[4] as bigint,
+        depositTime: deal[5] as bigint,
+        deadline,
+        nonce,
+    } as const;
+
+    const account = signer === 'buyer' ? (deal[1] as Address) : (deal[2] as Address);
+    const client = signer === 'buyer' ? buyerClient : sellerClient;
+
+    return client.signTypedData({
+        account,
+        domain: getDomain(),
+        types,
+        primaryType: 'StartDispute',
+        message,
+    });
 }
 
+async function signRequestCancelTyped(escrowId: number, deal: any, deadline: bigint, nonce: bigint, signer: 'buyer' | 'seller') {
+    const message = {
+        escrowId: BigInt(escrowId),
+        buyer: deal[1] as Address,
+        seller: deal[2] as Address,
+        arbiter: deal[3] as Address,
+        token: tokenAddress,
+        amount: deal[4] as bigint,
+        depositTime: deal[5] as bigint,
+        deadline,
+        nonce,
+    } as const;
+
+    const account = signer === 'buyer' ? (deal[1] as Address) : (deal[2] as Address);
+    const client = signer === 'buyer' ? buyerClient : sellerClient;
+
+    return client.signTypedData({
+        account,
+        domain: getDomain(),
+        types,
+        primaryType: 'RequestCancel',
+        message,
+    });
+}
 
 async function getDeal(id: number) {
-    return await publicClient.readContract({
+    return (await publicClient.readContract({
         address: escrowAddress,
         abi: escrowAbi,
         functionName: 'escrows',
-        args: [id]
-    }) as any;
+        args: [id],
+    })) as any;
 }
-
 
 async function increaseTime(seconds: number) {
     await publicClient.transport.request({ method: 'evm_increaseTime', params: [seconds] });
@@ -552,6 +613,8 @@ test('protocol fee withdraw reverts if already claimed', async () => {
     );
 });
 
+// --------- Meta-tx tests with EIP-712 ---------
+
 test('meta transaction: signature replay is blocked by nonce', async () => {
     const id = await setupDeal();
 
@@ -563,47 +626,21 @@ test('meta transaction: signature replay is blocked by nonce', async () => {
     });
 
     let deal = await getDeal(id);
-    assert.equal(
-        deal[8],
-        State.AWAITING_DELIVERY,
-        'Escrow should be AWAITING_DELIVERY after deposit',
-    );
+    assert.equal(deal[8], State.AWAITING_DELIVERY, 'Escrow should be AWAITING_DELIVERY after deposit');
 
     const block = await publicClient.getBlock();
     const currentTs = Number(block.timestamp);
     const deadline = BigInt(currentTs + 3600);
 
-
-    const nonce = await publicClient.readContract({
+    const nonce = (await publicClient.readContract({
         address: escrowAddress,
         abi: escrowAbi,
-        functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
-        args: [id]
-    }) as bigint;
-    const buyer = deal[1];
-    const seller = deal[2];
-    const arbiter = deal[3];
-    const amount = deal[4] as bigint;
-    const depositTime = deal[5] as bigint;
+        functionName: 'getBuyerNonce',
+        args: [id],
+    })) as bigint;
 
-    const hash = buildMessageHash(
-        chainId,
-        escrowAddress,
-        id,
-        buyer,
-        seller,
-        arbiter,
-        tokenAddress,
-        amount,
-        depositTime,
-        deadline,
-        nonce,
-        selectors.confirmDelivery
-    );
+    const signature = await signConfirmDeliveryTyped(id, deal, deadline, nonce);
 
-    const signature = await sign(buyerClient, buyer, hash);
-
-    // 3) First call works – meta-tx accepted
     await buyerClient.writeContract({
         address: escrowAddress,
         abi: escrowAbi,
@@ -612,11 +649,103 @@ test('meta transaction: signature replay is blocked by nonce', async () => {
     });
 
     deal = await getDeal(id);
-    assert.equal(
-        deal[8],
-        State.COMPLETE,
-        'Escrow should be COMPLETE after first meta-confirm',
+    assert.equal(deal[8], State.COMPLETE, 'Escrow should be COMPLETE after first meta-confirm');
+
+    await assert.rejects(() =>
+        buyerClient.writeContract({
+            address: escrowAddress,
+            abi: escrowAbi,
+            functionName: 'confirmDeliverySigned',
+            args: [id, signature, deadline, nonce],
+        }),
     );
+});
+
+test('meta transaction: invalid signature is rejected', async () => {
+    const id = await setupDeal();
+    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
+
+    const nonce = (await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'getBuyerNonce',
+        args: [id],
+    })) as bigint;
+
+    const deal = await getDeal(id);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+    const message = {
+        escrowId: BigInt(id),
+        buyer: deal[1] as Address,
+        seller: deal[2] as Address,
+        arbiter: deal[3] as Address,
+        token: tokenAddress,
+        amount: deal[4] as bigint,
+        depositTime: deal[5] as bigint,
+        deadline,
+        nonce,
+    } as const;
+
+    // Wrong signer: seller instead of buyer
+    const invalidSig = await sellerClient.signTypedData({
+        account: seller.address,
+        domain: getDomain(),
+        types,
+        primaryType: 'ConfirmDelivery',
+        message,
+    });
+
+    await assert.rejects(
+        () =>
+            buyerClient.writeContract({
+                address: escrowAddress,
+                abi: escrowAbi,
+                functionName: 'confirmDeliverySigned',
+                args: [id, invalidSig, deadline, nonce],
+            }),
+        (err: any) => {
+            // viem wraps the revert; just check message contains something expected
+            const msg = String(err?.message ?? '');
+            // you can also check for your custom revert text if you bubble it up
+            return msg.includes('Internal error') || msg.includes('Unauthorized signer');
+        },
+    );
+});
+
+test('meta transaction: deadline too early is rejected', async () => {
+    const id = await setupDeal();
+    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
+
+    const deal = await getDeal(id);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) - 10); // past
+
+    const nonce = (await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'getBuyerNonce',
+        args: [id],
+    })) as bigint;
+
+    const message = {
+        escrowId: BigInt(id),
+        buyer: deal[1] as Address,
+        seller: deal[2] as Address,
+        arbiter: deal[3] as Address,
+        token: tokenAddress,
+        amount: deal[4] as bigint,
+        depositTime: deal[5] as bigint,
+        deadline,
+        nonce,
+    } as const;
+
+    const signature = await buyerClient.signTypedData({
+        account: buyer.address,
+        domain: getDomain(),
+        types,
+        primaryType: 'ConfirmDelivery',
+        message,
+    });
 
     await assert.rejects(
         () =>
@@ -626,7 +755,88 @@ test('meta transaction: signature replay is blocked by nonce', async () => {
                 functionName: 'confirmDeliverySigned',
                 args: [id, signature, deadline, nonce],
             }),
+        (err: any) => {
+            const msg = String(err?.message ?? '');
+            // This revert should come from your `require(deadline > block.timestamp && ...)`
+            return msg.includes('Internal error') || msg.includes('Invalid or expired signature');
+        },
     );
+
+});
+
+test('meta-tx: startDisputeSigned allows relayed dispute by buyer signature', async () => {
+    const id = await setupDeal();
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id],
+    });
+
+    let deal = await getDeal(id);
+    assert.equal(deal[8], State.AWAITING_DELIVERY, 'Escrow should be AWAITING_DELIVERY after deposit');
+
+    const block = await publicClient.getBlock();
+    const currentTs = Number(block.timestamp);
+    const deadline = BigInt(currentTs + 3600);
+
+    const nonce = (await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'getBuyerNonce',
+        args: [id],
+    })) as bigint;
+
+    const signature = await signStartDisputeTyped(id, deal, deadline, nonce, 'buyer');
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'startDisputeSigned',
+        args: [id, signature, deadline, nonce],
+    });
+
+    deal = await getDeal(id);
+    assert.equal(deal[8], State.DISPUTED, 'Deal state should be DISPUTED after relayed startDisputeSigned');
+});
+
+test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signature', async () => {
+    const id = await setupDeal();
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'deposit',
+        args: [id],
+    });
+
+    let deal = await getDeal(id);
+    assert.equal(deal[8], State.AWAITING_DELIVERY, 'Escrow should be AWAITING_DELIVERY before cancel request');
+
+    const block = await publicClient.getBlock();
+    const currentTs = Number(block.timestamp);
+    const deadline = BigInt(currentTs + 3600);
+
+    const nonce = (await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'getBuyerNonce',
+        args: [id],
+    })) as bigint;
+
+    const signature = await signRequestCancelTyped(id, deal, deadline, nonce, 'buyer');
+
+    await buyerClient.writeContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'requestCancelSigned',
+        args: [id, signature, deadline, nonce],
+    });
+
+    deal = await getDeal(id);
+    const buyerCancel = deal.buyerCancelRequested ?? deal[9];
+    assert.equal(buyerCancel, true, 'Buyer cancel request should be recorded after requestCancelSigned');
 });
 
 
@@ -653,101 +863,6 @@ test('withdrawal reverts for seller with zero balance', async () => {
     await assert.rejects(
         async () => await sellerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'withdraw', args: [id] }),
         "Withdraw with zero balance should revert for seller"
-    );
-});
-
-test('meta transaction: invalid signature is rejected', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
-    const nonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
-        args: [id]
-    }) as bigint;
-
-    let deal = await getDeal(id);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-
-    const buyer = deal[1];
-    const seller = deal[2];
-    const arbiter = deal[3];
-    const amount = deal[4] as bigint;
-    const depositTime = deal[5] as bigint;
-
-    const hash = buildMessageHash(
-        chainId,
-        escrowAddress,
-        id,
-        buyer,
-        seller,
-        arbiter,
-        tokenAddress,
-        amount,
-        depositTime,
-        deadline,
-        nonce,
-        selectors.confirmDelivery
-    );
-
-
-    const invalidSig = await sign(buyerClient, buyer.address, hash);
-
-    await assert.rejects(
-        async () => await buyerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'confirmDeliverySigned',
-            args: [id, invalidSig, deadline, nonce]
-        }),
-        "Should revert on invalid buyer signature"
-    );
-});
-
-test('meta transaction: deadline too early is rejected', async () => {
-    const id = await setupDeal();
-    await buyerClient.writeContract({ address: escrowAddress, abi: escrowAbi, functionName: 'deposit', args: [id] });
-    let deal = await getDeal(id);
-    const deadline = BigInt(Math.floor(Date.now() / 1000) - 10); // Deadline in the past
-
-    const nonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
-        args: [id]
-    }) as bigint;
-
-    const buyer = deal[1];
-    const seller = deal[2];
-    const arbiter = deal[3];
-    const amount = deal[4] as bigint;
-    const depositTime = deal[5] as bigint;
-
-    const hash = buildMessageHash(
-        chainId,
-        escrowAddress,
-        id,
-        buyer,
-        seller,
-        arbiter,
-        tokenAddress,
-        amount,
-        depositTime,
-        deadline,
-        nonce,
-        selectors.confirmDelivery
-    );
-
-    const signature = await sign(buyerClient, buyer, hash);
-
-    await assert.rejects(
-        async () => await buyerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'confirmDeliverySigned',
-            args: [id, signature, deadline, nonce]
-        }),
-        "Must revert due to expired deadline"
     );
 });
 
@@ -799,140 +914,6 @@ test('cannot start dispute after escrow is complete', async () => {
             args: [id]
         }),
         "Cannot start dispute on completed escrow"
-    );
-});
-
-test('meta-tx: startDisputeSigned allows relayed dispute by buyer signature', async () => {
-    const id = await setupDeal();
-
-    // Deposit -> AWAITING_DELIVERY
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    let deal = await getDeal(id);
-    assert.equal(
-        deal[8],
-        State.AWAITING_DELIVERY,
-        'Escrow should be AWAITING_DELIVERY after deposit',
-    );
-
-    const block = await publicClient.getBlock();
-    const currentTs = Number(block.timestamp);
-    const deadline = BigInt(currentTs + 3600); // 1h in future
-
-    const nonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
-        args: [id]
-    }) as bigint;
-
-    const buyer = deal[1];
-    const seller = deal[2];
-    const arbiter = deal[3];
-    const amount = deal[4] as bigint;
-    const depositTime = deal[5] as bigint;
-
-    const hash = buildMessageHash(
-        chainId,
-        escrowAddress,
-        id,
-        buyer,
-        seller,
-        arbiter,
-        tokenAddress,
-        amount,
-        depositTime,
-        deadline,
-        nonce,
-        selectors.startDispute
-    );
-
-    const signature = await sign(buyerClient, buyer, hash);
-
-    // Relayer submits (can be buyer or anyone – here we just use buyer again)
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'startDisputeSigned',
-        args: [id, signature, deadline, nonce],
-    });
-
-    deal = await getDeal(id);
-    assert.equal(
-        deal[8],
-        State.DISPUTED,
-        'Deal state should be DISPUTED after relayed startDisputeSigned',
-    );
-});
-
-test('meta-tx: requestCancelSigned allows relayed cancel request by buyer signature', async () => {
-    const id = await setupDeal();
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [id],
-    });
-
-    let deal = await getDeal(id);
-    assert.equal(
-        deal[8],
-        State.AWAITING_DELIVERY,
-        'Escrow should be AWAITING_DELIVERY before cancel request',
-    );
-
-    const block = await publicClient.getBlock();
-    const currentTs = Number(block.timestamp);
-    const deadline = BigInt(currentTs + 3600);
-
-    const nonce = await publicClient.readContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'getBuyerNonce',  // or getSellerNonce/getArbiterNonce
-        args: [id]
-    }) as bigint;
-
-    const buyer = deal[1];
-    const seller = deal[2];
-    const arbiter = deal[3];
-    const amount = deal[4] as bigint;
-    const depositTime = deal[5] as bigint;
-
-    const hash = buildMessageHash(
-        chainId,
-        escrowAddress,
-        id,
-        buyer,
-        seller,
-        arbiter,
-        tokenAddress,
-        amount,
-        depositTime,
-        deadline,
-        nonce,
-        selectors.requestCancel
-    );
-
-    const signature = await sign(buyerClient, buyer, hash);
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'requestCancelSigned',
-        args: [id, signature, deadline, nonce],
-    });
-
-    deal = await getDeal(id);
-    assert.equal(
-        deal.buyerCancelRequested ?? deal[9],
-        true,
-        'Buyer cancel request should be recorded after requestCancelSigned',
     );
 });
 

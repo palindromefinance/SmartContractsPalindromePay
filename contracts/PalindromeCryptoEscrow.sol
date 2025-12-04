@@ -19,7 +19,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
 
     uint256 private constant _FEE_BPS = 100; 
     uint256 public constant DISPUTE_SHORT_TIMEOUT = 7 days;
-    uint256 public constant DISPUTE_LONG_TIMEOUT = 1 days;
+    uint256 public constant DISPUTE_LONG_TIMEOUT = 30 days;
     uint256 public constant TIMEOUT_BUFFER = 1 hours;
     uint256 constant GRACE_PERIOD = 6 hours;
 
@@ -200,6 +200,44 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         usedSignatures[escrowSigHash] = true;
     }
 
+    function _validateIpfsLength(string calldata ipfsHash) internal pure {
+        uint256 len = bytes(ipfsHash).length;
+        require(len > 0 && len <= 100, "Invalid IPFS hash length");
+    }
+
+    function _validateTitleLength(string calldata title) internal pure {
+        uint256 len = bytes(title).length;
+        require(len > 0 && len <= 100, "Invalid title length");
+    }
+
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
+    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    bytes32 private constant CONFIRM_DELIVERY_TYPEHASH = keccak256(
+    "ConfirmDelivery(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
+    );
+
+    bytes32 private constant REQUEST_CANCEL_TYPEHASH = keccak256(
+        "RequestCancel(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
+    );
+
+    bytes32 private constant START_DISPUTE_TYPEHASH = keccak256(
+        "StartDispute(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
+    );
+
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("PalindromeCryptoEscrow")),
+                keccak256(bytes("1")),
+                block.chainid,  
+                address(this)
+            )
+        );
+    }
+
     /**
     * @notice Initializes contract and sets initial allowed token.
     * @param initialAllowedToken The address of the first allowed ERC20 token.
@@ -242,6 +280,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         string calldata title,
         string calldata ipfsHash
     ) external returns (uint256) {
+        _validateTitleLength(title);
+        _validateIpfsLength(ipfsHash);
         require(token != address(0), "Token cannot be zero address");
         require(allowedTokens[token], "Token not allowed");
         require(buyer != address(0), "Buyer cannot be zero address");
@@ -304,6 +344,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         string calldata title,
         string calldata ipfsHash
     ) external nonReentrant returns (uint256 escrowId) {
+        _validateTitleLength(title);
+        _validateIpfsLength(ipfsHash);
         require(token != address(0), "Token cannot be zero address");
         require(allowedTokens[token], "Token not allowed");
         require(seller != address(0), "Buyer cannot be zero address");
@@ -382,7 +424,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 minFee = 10 ** (decimals > 2 ? decimals - 2 : 0); 
 
         if (applyFee) {
-            uint256 calculatedFee = (amount / 10_000) * _FEE_BPS; 
+            uint256 calculatedFee = (amount * _FEE_BPS) / 10_000;
             feeTaken = calculatedFee >= minFee ? calculatedFee : minFee;
 
             uint256 maxFee = amount / 10;
@@ -678,13 +720,11 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         
         bytes32 structHash = keccak256(
             abi.encode(
-                block.chainid,
-                address(this),
-                bytes4(keccak256("confirmDeliverySigned(uint256,bytes,uint256,uint256)")),
+               CONFIRM_DELIVERY_TYPEHASH,
                 escrowId,
                 deal.buyer,
                 deal.seller,
-                deal.arbiter, 
+                deal.arbiter,
                 deal.token,
                 deal.amount,
                 deal.depositTime,
@@ -692,8 +732,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 nonce
             )
         );
+
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
         
-        address signer = ECDSA.recover(structHash.toEthSignedMessageHash(), signature);
+        address signer = ECDSA.recover(digest, signature);
         require(signer != address(0), "Invalid recovery");
         require(signer == deal.buyer, "Unauthorized signer");
 
@@ -732,9 +776,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
 
         bytes32 structHash = keccak256(
             abi.encode(
-                block.chainid,
-                address(this),
-                bytes4(keccak256("requestCancelSigned(uint256,bytes,uint256,uint256)")),
+                REQUEST_CANCEL_TYPEHASH,
                 escrowId,
                 deal.buyer,
                 deal.seller,
@@ -746,8 +788,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 nonce
             )
         );
-        
-        address signer = ECDSA.recover(structHash.toEthSignedMessageHash(), signature);
+
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
+
+        address signer = ECDSA.recover(digest, signature);
         require(signer != address(0), "Invalid recovery");
         require(
             (signer == deal.buyer && msg.sender == deal.buyer) ||
@@ -801,9 +847,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         
         bytes32 structHash = keccak256(
             abi.encode(
-                block.chainid,
-                address(this),
-                bytes4(keccak256("startDisputeSigned(uint256,bytes,uint256,uint256)")),
+                START_DISPUTE_TYPEHASH,
                 escrowId,
                 deal.buyer,
                 deal.seller,
@@ -815,8 +859,13 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
                 nonce
             )
         );
-        
-        address signer = ECDSA.recover(structHash.toEthSignedMessageHash(), signature);
+
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
+
+        address signer = ECDSA.recover(digest, signature);
+
         require(signer != address(0), "Invalid recovery");
         require(
             (signer == deal.buyer && msg.sender == deal.buyer) ||
