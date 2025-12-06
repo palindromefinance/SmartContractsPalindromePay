@@ -503,13 +503,14 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         uint256 amount = withdrawable[escrowId][msg.sender];
         require(amount > 0, "Nothing to withdraw");
 
+
+        withdrawable[escrowId][msg.sender] = 0;
+        aggregatedBalance[deal.token][msg.sender] -= amount;
+
         require(
             aggregatedBalance[deal.token][msg.sender] >= amount,
             "Insufficient aggregate balance"
         );
-
-        withdrawable[escrowId][msg.sender] = 0;
-        aggregatedBalance[deal.token][msg.sender] -= amount;
 
         if (msg.sender == deal.buyer) {
             deal.buyerWithdrawn = true;
@@ -517,8 +518,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
             deal.sellerWithdrawn = true;
         }
 
-        IERC20(deal.token).safeTransfer(msg.sender, amount);
         emit Withdrawn(deal.token, msg.sender, amount);
+        IERC20(deal.token).safeTransfer(msg.sender, amount);
+     
     }
 
     /// @notice Allows the contract owner (recommended: multisig) to withdraw all accumulated protocol fees for a specific token
@@ -621,6 +623,11 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(!deal.sellerCancelRequested, "Mutual cancel already processed");
         require(deal.depositTime != 0, "Deposit not made");
         require(block.timestamp > deal.maturityTime + GRACE_PERIOD, "Grace period not reached");
+
+        if (deal.disputeStartTime > 0 && 
+            deal.disputeStartTime > deal.maturityTime + GRACE_PERIOD) {
+            revert("Late dispute cannot block timeout");
+        }
 
         _escrowPayout(escrowId, deal.token, deal.buyer, deal.amount, false);
         deal.state = State.CANCELED;
@@ -774,16 +781,15 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         require(signer != address(0), "Invalid recovery");
         require(signer == deal.buyer, "Unauthorized signer");
 
-        require(msg.sender == deal.buyer, "Unauthorized submitter");
-
          _useSignature(escrowId, signature);
 
         uint256 expectedNonce = _getRoleNonce(escrowId, deal.buyer, deal);
         require(nonce == expectedNonce, "Invalid nonce");
-        _incrementRoleNonce(escrowId, deal.buyer, deal);
-        
+      
         uint256 fee = _escrowPayout(escrowId, deal.token, deal.seller, deal.amount, true);
         deal.state = State.COMPLETE;
+
+        _incrementRoleNonce(escrowId, deal.buyer, deal);
         
         emit DeliveryConfirmed(escrowId, deal.buyer, deal.seller, deal.amount, fee);
     }
@@ -853,7 +859,6 @@ contract PalindromeCryptoEscrow is ReentrancyGuard, Ownable2Step {
         
         emit RequestCancel(escrowId, signer);
         
-        // 9. Atomic mutual cancel if both requested
         if (!wasMutual && deal.buyerCancelRequested && deal.sellerCancelRequested) {
             _escrowPayout(escrowId, deal.token, deal.buyer, deal.amount, false);
             deal.state = State.CANCELED;
