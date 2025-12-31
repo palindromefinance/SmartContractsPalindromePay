@@ -11,6 +11,7 @@ import "./PalindromeEscrowWallet.sol";
 
 /**
  * @title PalindromeCryptoEscrow
+ * @author Palindrome Finance
  * @notice Trustless escrow for ERC20 token transactions with dispute resolution
  * @dev Creates individual wallet contracts for each escrow using CREATE2.
  *      Supports buyer/seller cancellation, arbiter-based dispute resolution,
@@ -24,15 +25,17 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Enums
     // ---------------------------------------------------------------------
 
+    /// @notice Possible states of an escrow deal
     enum State {
-        AWAITING_PAYMENT,
-        AWAITING_DELIVERY,
-        DISPUTED,
-        COMPLETE,
-        REFUNDED,
-        CANCELED
+        AWAITING_PAYMENT,   // Escrow created, waiting for buyer deposit
+        AWAITING_DELIVERY,  // Funds deposited, waiting for delivery confirmation
+        DISPUTED,           // Dispute raised, awaiting arbiter decision
+        COMPLETE,           // Delivery confirmed, seller paid
+        REFUNDED,           // Dispute resolved in buyer's favor
+        CANCELED            // Mutual cancellation or timeout
     }
 
+    /// @notice Participant roles in an escrow
     enum Role {
         None,
         Buyer,
@@ -44,78 +47,140 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Constants
     // ---------------------------------------------------------------------
 
+    /// @dev Platform fee in basis points (1% = 100 bps)
     uint256 private constant _FEE_BPS = 100;
+
+    /// @dev Basis points denominator (100% = 10,000 bps)
     uint256 private constant BPS_DENOMINATOR = 10_000;
+
+    /// @dev Maximum length for title and IPFS hash strings
     uint256 private constant MAX_STRING_LENGTH = 500;
+
+    /// @notice Maximum time for arbiter to resolve dispute
     uint256 public constant DISPUTE_LONG_TIMEOUT = 30 days;
+
+    /// @notice Buffer time after dispute timeout before auto-resolution
     uint256 public constant TIMEOUT_BUFFER = 1 hours;
+
+    /// @notice Grace period after deposit before timeout cancellation allowed
     uint256 public constant GRACE_PERIOD = 24 hours;
 
     // ---------------------------------------------------------------------
     // Structs
     // ---------------------------------------------------------------------
 
+    /// @notice Represents a single escrow deal
+    /// @dev Stored in the escrows mapping, indexed by escrowId
     struct EscrowDeal {
-        address token;
-        address buyer;
-        address seller;
-        address arbiter;
-        address wallet;
-        uint256 amount;
-        uint256 depositTime;
-        uint256 maturityTime;
-        uint256 disputeStartTime;
-        State state;
-        bool buyerCancelRequested;
-        bool sellerCancelRequested;
-        uint8 tokenDecimals;
-        bytes sellerWalletSig;
-        bytes buyerWalletSig;
-        bytes arbiterWalletSig;
+        address token;              // ERC20 token being escrowed
+        address buyer;              // Party paying for goods/services
+        address seller;             // Party providing goods/services
+        address arbiter;            // Neutral party for dispute resolution
+        address wallet;             // CREATE2-deployed wallet holding funds
+        uint256 amount;             // Token amount in escrow
+        uint256 depositTime;        // Timestamp when buyer deposited
+        uint256 maturityTime;       // Deadline for delivery
+        uint256 disputeStartTime;   // Timestamp when dispute was raised
+        State state;                // Current escrow state
+        bool buyerCancelRequested;  // Buyer has requested cancellation
+        bool sellerCancelRequested; // Seller has requested cancellation
+        uint8 tokenDecimals;        // Token decimals (cached for fee calc)
+        bytes sellerWalletSig;      // Seller's wallet authorization signature
+        bytes buyerWalletSig;       // Buyer's wallet authorization signature
+        bytes arbiterWalletSig;     // Arbiter's wallet authorization signature
     }
 
     // ---------------------------------------------------------------------
     // Immutables
     // ---------------------------------------------------------------------
 
+    /// @notice Address receiving platform fees
     address public immutable feeReceiver;
+
+    /// @notice Keccak256 hash of wallet contract bytecode for CREATE2
     bytes32 public immutable WALLET_BYTECODE_HASH;
+
+    /// @dev Cached EIP-712 domain separator at deployment
     bytes32 private immutable INITIAL_DOMAIN_SEPARATOR;
+
+    /// @dev Chain ID at deployment for domain separator validation
     uint256 private immutable INITIAL_CHAIN_ID;
 
     // ---------------------------------------------------------------------
     // State
     // ---------------------------------------------------------------------
 
+    /// @notice Counter for generating unique escrow IDs
     uint256 public nextEscrowId;
 
+    /// @dev Mapping of escrow ID to deal details
     mapping(uint256 => EscrowDeal) private escrows;
+
+    /// @dev Tracks used signatures to prevent replay attacks
     mapping(bytes32 => bool) private usedSignatures;
+
+    /// @dev Tracks whether arbiter has submitted decision for an escrow
     mapping(uint256 => bool) private arbiterDecisionSubmitted;
+
+    /// @dev Bitmap for tracking used nonces: escrowId => signer => bucket => bitmap
     mapping(uint256 => mapping(address => mapping(uint256 => uint256))) private nonceBitmap;
+
+    /// @notice Bitmap tracking dispute evidence submission (bit 0 = buyer, bit 1 = seller)
     mapping(uint256 => uint256) public disputeStatus;
 
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
 
+    /// @notice Thrown when a nonce has already been used
     error InvalidNonce();
+
+    /// @notice Thrown when a signature has already been used
     error SignatureAlreadyUsed();
+
+    /// @notice Thrown when signature length is not 65 bytes
     error SignatureLengthInvalid();
+
+    /// @notice Thrown when signature 's' value is in upper half of curve
     error SignatureSInvalid();
+
+    /// @notice Thrown when signature 'v' value is not 27 or 28
     error SignatureVInvalid();
+
+    /// @notice Thrown when caller is not the buyer
     error OnlyBuyer();
+
+    /// @notice Thrown when caller is not the seller
     error OnlySeller();
+
+    /// @notice Thrown when caller is not the arbiter
     error OnlyArbiter();
+
+    /// @notice Thrown when caller is neither buyer nor seller
     error OnlyBuyerOrSeller();
+
+    /// @notice Thrown when caller is not a participant (buyer, seller, or arbiter)
     error NotParticipant();
 
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
+    /// @notice Emitted when a new escrow wallet is deployed
+    /// @param escrowId The unique escrow identifier
+    /// @param wallet The deployed wallet contract address
     event WalletCreated(uint256 indexed escrowId, address indexed wallet);
 
+    /// @notice Emitted when a new escrow is created
+    /// @param escrowId The unique escrow identifier
+    /// @param buyer The buyer's address
+    /// @param seller The seller's address
+    /// @param token The ERC20 token address
+    /// @param amount The escrow amount
+    /// @param arbiter The arbiter's address
+    /// @param maturityTime The delivery deadline timestamp
+    /// @param title The escrow title
+    /// @param ipfsHash IPFS hash containing deal details
     event EscrowCreated(
         uint256 indexed escrowId,
         address indexed buyer,
@@ -128,18 +193,32 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         string ipfsHash
     );
 
+    /// @notice Emitted when escrow is created and funded in one transaction
+    /// @param escrowId The unique escrow identifier
+    /// @param buyer The buyer's address
+    /// @param amount The deposited amount
     event EscrowCreatedAndDeposited(
         uint256 indexed escrowId,
         address indexed buyer,
         uint256 amount
     );
 
+    /// @notice Emitted when buyer deposits funds into escrow
+    /// @param escrowId The unique escrow identifier
+    /// @param buyer The buyer's address
+    /// @param amount The deposited amount
     event PaymentDeposited(
         uint256 indexed escrowId,
         address indexed buyer,
         uint256 amount
     );
 
+    /// @notice Emitted when buyer confirms delivery
+    /// @param escrowId The unique escrow identifier
+    /// @param buyer The buyer's address
+    /// @param seller The seller's address
+    /// @param amount The total escrow amount
+    /// @param fee The platform fee deducted
     event DeliveryConfirmed(
         uint256 indexed escrowId,
         address indexed buyer,
@@ -148,16 +227,32 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 fee
     );
 
+    /// @notice Emitted when buyer or seller requests cancellation
+    /// @param escrowId The unique escrow identifier
+    /// @param requester The address requesting cancellation
     event RequestCancel(uint256 indexed escrowId, address indexed requester);
 
+    /// @notice Emitted when escrow is canceled
+    /// @param escrowId The unique escrow identifier
+    /// @param initiator The address that triggered cancellation
+    /// @param amount The refunded amount
     event Canceled(
         uint256 indexed escrowId,
         address indexed initiator,
         uint256 amount
     );
 
+    /// @notice Emitted when a dispute is started
+    /// @param escrowId The unique escrow identifier
+    /// @param initiator The address that started the dispute
     event DisputeStarted(uint256 indexed escrowId, address indexed initiator);
 
+    /// @notice Emitted when arbiter resolves a dispute
+    /// @param escrowId The unique escrow identifier
+    /// @param resolution The final state (COMPLETE or REFUNDED)
+    /// @param arbiter The arbiter's address
+    /// @param amount The total escrow amount
+    /// @param fee The platform fee (0 for refunds)
     event DisputeResolved(
         uint256 indexed escrowId,
         State resolution,
@@ -166,6 +261,11 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 fee
     );
 
+    /// @notice Emitted when evidence is submitted during dispute
+    /// @param escrowId The unique escrow identifier
+    /// @param sender The address submitting evidence
+    /// @param role The sender's role (Buyer, Seller, or Arbiter)
+    /// @param ipfsHash IPFS hash of the evidence
     event DisputeMessagePosted(
         uint256 indexed escrowId,
         address indexed sender,
@@ -173,11 +273,20 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         string ipfsHash
     );
 
+    /// @notice Emitted when dispute deadlines are set
+    /// @param escrowId The unique escrow identifier
+    /// @param longDeadline The long timeout deadline
     event DisputeDeadlinesSet(
         uint256 indexed escrowId,
         uint256 longDeadline
     );
 
+    /// @notice Emitted when payout is proposed for wallet withdrawal
+    /// @param escrowId The unique escrow identifier
+    /// @param recipient The address to receive funds
+    /// @param netAmount Amount after fees
+    /// @param feeRecipient The fee receiver address
+    /// @param feeAmount The fee amount
     event PayoutProposed(
         uint256 indexed escrowId,
         address recipient,
@@ -186,32 +295,53 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         uint256 feeAmount
     );
 
+    /// @notice Emitted when seller's wallet signature is stored
+    /// @param escrowId The unique escrow identifier
+    /// @param sellerSig The seller's signature
     event SellerWalletSigAttached(
         uint256 indexed escrowId,
         bytes sellerSig
     );
 
+    /// @notice Emitted when buyer's wallet signature is stored
+    /// @param escrowId The unique escrow identifier
+    /// @param buyerSig The buyer's signature
     event BuyerWalletSigAttached(
         uint256 indexed escrowId,
         bytes buyerSig
     );
 
+    /// @notice Emitted when arbiter's wallet signature is stored
+    /// @param escrowId The unique escrow identifier
+    /// @param arbiterSig The arbiter's signature
     event ArbiterWalletSigAttached(
         uint256 indexed escrowId,
         bytes arbiterSig
     );
 
+    /// @notice Emitted when seller accepts a buyer-created escrow
+    /// @param escrowId The unique escrow identifier
+    /// @param seller The seller's address
     event SellerAccepted(
         uint256 indexed escrowId,
         address indexed seller
     );
 
+    /// @notice Emitted when escrow state changes
+    /// @param escrowId The unique escrow identifier
+    /// @param oldState The previous state
+    /// @param newState The new state
     event StateChanged(
         uint256 indexed escrowId,
         State oldState,
         State indexed newState
     );
 
+    /// @notice Emitted when funds are auto-released to seller after timeout
+    /// @param escrowId The unique escrow identifier
+    /// @param seller The seller's address
+    /// @param amount The total escrow amount
+    /// @param fee The platform fee deducted
     event AutoReleased(
         uint256 indexed escrowId,
         address indexed seller,
@@ -223,12 +353,16 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Modifiers
     // ---------------------------------------------------------------------
 
+    /// @notice Ensures the escrow exists and is initialized
+    /// @param escrowId The escrow ID to check
     modifier escrowExists(uint256 escrowId) {
         require(escrowId < nextEscrowId, "Escrow does not exist");
         require(escrows[escrowId].buyer != address(0), "Not initialized");
         _;
     }
 
+    /// @notice Restricts access to escrow participants only
+    /// @param escrowId The escrow ID
     modifier onlyParticipant(uint256 escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         if (
@@ -239,6 +373,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         _;
     }
 
+    /// @notice Restricts access to buyer or seller only
+    /// @param escrowId The escrow ID
     modifier onlyBuyerOrSeller(uint256 escrowId) {
         EscrowDeal storage deal = escrows[escrowId];
         if (msg.sender != deal.buyer && msg.sender != deal.seller) {
@@ -247,16 +383,22 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         _;
     }
 
+    /// @notice Restricts access to buyer only
+    /// @param escrowId The escrow ID
     modifier onlyBuyer(uint256 escrowId) {
         if (msg.sender != escrows[escrowId].buyer) revert OnlyBuyer();
         _;
     }
 
+    /// @notice Restricts access to seller only
+    /// @param escrowId The escrow ID
     modifier onlySeller(uint256 escrowId) {
         if (msg.sender != escrows[escrowId].seller) revert OnlySeller();
         _;
     }
 
+    /// @notice Restricts access to arbiter only
+    /// @param escrowId The escrow ID
     modifier onlyArbiter(uint256 escrowId) {
         if (msg.sender != escrows[escrowId].arbiter) revert OnlyArbiter();
         _;
@@ -266,6 +408,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Constructor
     // ---------------------------------------------------------------------
 
+    /// @notice Initializes the escrow contract
+    /// @param _feeReceiver Address to receive platform fees
     constructor(address _feeReceiver) {
         require(_feeReceiver != address(0), "FeeTo zero");
         feeReceiver = _feeReceiver;
@@ -282,6 +426,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Views
     // ---------------------------------------------------------------------
 
+    /// @notice Retrieves escrow deal details
+    /// @param escrowId The escrow ID
+    /// @return The EscrowDeal struct containing all deal details
     function getEscrow(uint256 escrowId)
         external
         view
@@ -291,6 +438,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         return escrows[escrowId];
     }
 
+    /// @dev Retrieves and validates token decimals
+    /// @param token The ERC20 token address
+    /// @return The token's decimal places (must be 6-18)
     function getTokenDecimals(address token)
         internal
         view
@@ -308,6 +458,10 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Internal nonce & signature guards (for *Signed coordinator calls)
     // ---------------------------------------------------------------------
 
+    /// @dev Marks a nonce as used for replay protection
+    /// @param escrowId The escrow ID
+    /// @param signer The signer's address
+    /// @param nonce The nonce to mark as used
     function _useNonce(
         uint256 escrowId,
         address signer,
@@ -324,6 +478,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         nonceBitmap[escrowId][signer][bucket] = bitmap | mask;
     }
 
+    /// @dev Validates and marks a coordinator signature as used
+    /// @param escrowId The escrow ID
+    /// @param signature The 65-byte signature to validate and consume
     function _useSignature(uint256 escrowId, bytes calldata signature)
         internal
     {
@@ -353,6 +510,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         usedSignatures[canonicalSigHash] = true;
     }
 
+    /// @dev Validates signature format without consuming it
+    /// @param signature The 65-byte signature to validate
     function _validateSignatureFormat(bytes calldata signature)
         internal
         pure
@@ -375,11 +534,15 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Validation helpers
     // ---------------------------------------------------------------------
 
+    /// @dev Validates IPFS hash length
+    /// @param ipfsHash The IPFS hash to validate
     function _validateIpfsLength(string calldata ipfsHash) internal pure {
         uint256 len = bytes(ipfsHash).length;
         require(len <= MAX_STRING_LENGTH, "Invalid IPFS hash length");
     }
 
+    /// @dev Validates title length (must be 1-500 characters)
+    /// @param title The title to validate
     function _validateTitleLength(string calldata title) internal pure {
         uint256 len = bytes(title).length;
         require(len > 0 && len <= MAX_STRING_LENGTH, "Invalid title length");
@@ -389,18 +552,23 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Coordinator EIP-712 domain (for *Signed functions)
     // ---------------------------------------------------------------------
 
+    /// @dev EIP-712 domain type hash
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
 
+    /// @dev Type hash for confirmDeliverySigned
     bytes32 private constant CONFIRM_DELIVERY_TYPEHASH = keccak256(
         "ConfirmDelivery(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
     );
 
+    /// @dev Type hash for startDisputeSigned
     bytes32 private constant START_DISPUTE_TYPEHASH = keccak256(
         "StartDispute(uint256 escrowId,address buyer,address seller,address arbiter,address token,uint256 amount,uint256 depositTime,uint256 deadline,uint256 nonce)"
     );
 
+    /// @dev Returns domain separator, recomputing if chain ID changed (fork)
+    /// @return The EIP-712 domain separator
     function _domainSeparator() internal view returns (bytes32) {
         if (block.chainid == INITIAL_CHAIN_ID) {
             return INITIAL_DOMAIN_SEPARATOR;
@@ -409,6 +577,8 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         }
     }
 
+    /// @dev Computes the EIP-712 domain separator
+    /// @return The computed domain separator
     function _computeDomainSeparator() private view returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -425,6 +595,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Fee helpers
     // ---------------------------------------------------------------------
 
+    /// @dev Calculates minimum escrow amount based on token decimals
+    /// @param decimals The token's decimal places
+    /// @return Minimum amount (10 tokens in smallest unit)
     function _calculateMinimumAmount(uint8 decimals)
         internal
         pure
@@ -433,6 +606,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         return 10 * (10 ** decimals);
     }
 
+    /// @dev Calculates fee and net amount for payouts
+    /// @param amount The total amount
+    /// @param tokenDecimals The token's decimal places
+    /// @param applyFee Whether to apply the 1% fee
+    /// @return netAmount Amount after fee deduction
+    /// @return feeAmount The fee amount (0 if applyFee is false)
     function _computeFeeAndNet(
         uint256 amount,
         uint8 tokenDecimals,
@@ -455,6 +634,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // State & payout helpers
     // ---------------------------------------------------------------------
 
+    /// @dev Updates escrow state and emits StateChanged event
+    /// @param escrowId The escrow ID
+    /// @param newState The new state to set
     function _setState(uint256 escrowId, State newState) internal {
         EscrowDeal storage deal = escrows[escrowId];
         State oldState = deal.state;
@@ -462,6 +644,12 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
         emit StateChanged(escrowId, oldState, newState);
     }
 
+    /// @dev Calculates and emits payout proposal for wallet withdrawal
+    /// @param escrowId The escrow ID
+    /// @param recipient The address to receive funds
+    /// @param applyFee Whether to apply the platform fee
+    /// @return netAmount Amount recipient will receive
+    /// @return feeTaken Fee amount (0 if applyFee is false)
     function _proposePayout(
         uint256 escrowId,
         address recipient,
@@ -490,6 +678,9 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
     // Internal CREATE2 deploy
     // ---------------------------------------------------------------------
 
+    /// @dev Deploys a new escrow wallet using CREATE2 for deterministic addresses
+    /// @param escrowId The escrow ID used as salt
+    /// @return walletAddr The deployed wallet contract address
     function _deployWalletWithCreate2(uint256 escrowId)
         internal
         returns (address walletAddr)
@@ -1231,6 +1422,7 @@ contract PalindromeCryptoEscrow is ReentrancyGuard {
 
     /**
      * @notice Returns the escrow contract's domain separator
+     * @return The EIP-712 domain separator
      */
     function DOMAIN_SEPARATOR() external view returns (bytes32) {
         return _domainSeparator();

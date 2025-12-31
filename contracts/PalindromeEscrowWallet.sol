@@ -104,16 +104,37 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
     // Errors
     // ---------------------------------------------------------------------
 
+    /// @notice Thrown when funds have already been withdrawn
     error AlreadyWithdrawn();
+
+    /// @notice Thrown when escrow is not in a final state (COMPLETE, REFUNDED, CANCELED)
     error InvalidEscrowState();
+
+    /// @notice Thrown when caller is not a participant
     error OnlyParticipant();
+
+    /// @notice Thrown when token address is zero
     error TokenAddressZero();
+
+    /// @notice Thrown when fee receiver address is zero
     error FeeReceiverZero();
+
+    /// @notice Thrown when wallet is not empty after withdrawal
     error WalletNotEmpty();
+
+    /// @notice Thrown when fewer than 2 valid signatures are present
     error InsufficientSignatures();
+
+    /// @notice Thrown when a signature is invalid
     error InvalidSignature();
+
+    /// @notice Thrown when signature length is not 65 bytes
     error SignatureLengthInvalid();
+
+    /// @notice Thrown when signature 's' value is in upper half of curve
     error SignatureSInvalid();
+
+    /// @notice Thrown when signature 'v' value is not 27 or 28
     error SignatureVInvalid();
 
     // ---------------------------------------------------------------------
@@ -265,10 +286,10 @@ contract PalindromeEscrowWallet is ReentrancyGuard {
 
     /**
      * @dev Calculates fee and net amount (mirrors escrow contract logic)
-     * @param amount Total amount
-     * @param tokenDecimals Token decimals
-     * @return netAmount Amount after fee
-     * @return feeAmount Fee amount
+     * @param amount Total amount to split
+     * @param tokenDecimals Token decimal places for minimum fee calculation
+     * @return netAmount Amount after fee deduction
+     * @return feeAmount The 1% fee amount (minimum 0.01 tokens)
      */
     function _computeFeeAndNet(
         uint256 amount,

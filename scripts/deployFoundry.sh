@@ -1,8 +1,6 @@
 #!/bin/bash
-#./scripts/deploy.sh bsc-test pk
-#./scripts/deploy.sh base-test pk
-#./scripts/deploy.sh base-test trezor
-#./scripts/deploy.sh bsc-test trezor
+#./scripts/deployFoundry.sh base-test trezor
+#./scripts/deployFoundry.sh bsc-test trezor
 
 # Load environment variables
 source .env
@@ -22,6 +20,11 @@ if [ -z "$FEE_RECEIVER" ]; then
 fi
 
 export FEE_RECEIVER
+
+# Deployer address (derived from OWNER_KEY)
+if [ -n "$OWNER_KEY" ]; then
+    DEPLOYER_ADDRESS=$(cast wallet address --private-key "$OWNER_KEY" 2>/dev/null)
+fi
 
 print_usage() {
     echo ""
@@ -82,6 +85,7 @@ case $NETWORK in
         VERIFY_URL="https://api.etherscan.io/v2/api?chainid=97"
         ETHERSCAN_KEY="${ETH_API_KEY}"
         NETWORK_NAME="BSC Testnet"
+        GAS_PRICE="--with-gas-price 5000000000"
         ;;
     *)
         echo -e "${RED}Error: Unknown network '$NETWORK'${NC}"
@@ -95,6 +99,7 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Deploying to ${NETWORK_NAME}${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
+echo "Deployer: $DEPLOYER_ADDRESS"
 echo "Fee Receiver: $FEE_RECEIVER"
 echo "RPC URL: $RPC_URL"
 echo ""
@@ -107,6 +112,7 @@ FORGE_CMD="$FORGE_CMD --verify"
 FORGE_CMD="$FORGE_CMD --verifier-url $VERIFY_URL"
 FORGE_CMD="$FORGE_CMD --etherscan-api-key $ETHERSCAN_KEY"
 FORGE_CMD="$FORGE_CMD -vvvv"
+FORGE_CMD="$FORGE_CMD $GAS_PRICE"
 
 # Add signing method
 case $METHOD in
