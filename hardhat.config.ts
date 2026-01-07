@@ -13,6 +13,7 @@ const config: HardhatUserConfig = {
         settings: {
           optimizer: { enabled: true, runs: 200 },
           viaIR: true,
+          evmVersion: "cancun"
         },
       },
     ],
@@ -20,14 +21,16 @@ const config: HardhatUserConfig = {
   networks: {
     hardhatMainnet: { type: "edr-simulated", chainType: "l1" },
     hardhatOp: { type: "edr-simulated", chainType: "op" },
-    bsctestnet: {
+    // BSC Testnet
+    bscTestnet: {
       type: "http",
       chainId: 97,
       url: process.env.BSCTESTNET_RPC_URL || "https://data-seed-prebsc-1-s1.binance.org:8545",
-      accounts: process.env.BSCTESTNET_PRIVATE_KEY ? [process.env.BSCTESTNET_PRIVATE_KEY] : [],
+      accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
       gasPrice: 20000000000,
       chainType: "l1",
     },
+    // Base Sepolia (testnet)
     baseSepolia: {
       type: "http",
       chainId: 84532,
@@ -35,11 +38,48 @@ const config: HardhatUserConfig = {
       accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
       chainType: "op",
     },
-  },
-  verify: {
-    etherscan: {
-      apiKey: process.env.ETHERSCAN_API_KEY || process.env.BSCSCAN_API_KEY || "",
+    // BSC Mainnet
+    bsc: {
+      type: "http",
+      chainId: 56,
+      url: process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org",
+      accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
+      chainType: "l1",
     },
+    // Base Mainnet
+    base: {
+      type: "http",
+      chainId: 8453,
+      url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
+      accounts: process.env.OWNER_KEY ? [process.env.OWNER_KEY] : [],
+      chainType: "op",
+    },
+  },
+  etherscan: {
+    apiKey: {
+      bscTestnet: process.env.BSCSCAN_API_KEY || "",
+      bsc: process.env.BSCSCAN_API_KEY || "",
+      baseSepolia: process.env.BASESCAN_API_KEY || "",
+      base: process.env.BASESCAN_API_KEY || "",
+    },
+    customChains: [
+      {
+        network: "baseSepolia",
+        chainId: 84532,
+        urls: {
+          apiURL: "https://api-sepolia.basescan.org/api",
+          browserURL: "https://sepolia.basescan.org",
+        },
+      },
+      {
+        network: "base",
+        chainId: 8453,
+        urls: {
+          apiURL: "https://api.basescan.org/api",
+          browserURL: "https://basescan.org",
+        },
+      },
+    ],
   },
 };
 

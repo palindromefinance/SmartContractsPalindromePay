@@ -6,19 +6,17 @@
     "clean": "hardhat clean",
     "compile": "hardhat compile",
     "node": "hardhat node",
-    "deployLocal": "ts-node scripts/deployTest.ts",
-    "deployBSCTest": "ts-node scripts/deployBSCTest.ts",
-    "reset": "npm run clean && npm run compile",
-    "forge:clean": "rimraf cache out",
-    "forge:build": "npm run forge:clean && forge build 2>&1 | grep -v 'note\\[' | grep -v '^\\s*-->' | grep -v '^\\s*|' | grep -v 'help:'"
+    "deploy": "ts-node scripts/deploy.ts",
+    "deploy:local": "ts-node scripts/deploy.ts local",
+    "deploy:base-test": "ts-node scripts/deploy.ts base-test",
+    "deploy:bsc-test": "ts-node scripts/deploy.ts bsc-test",
+    "reset": "npm run clean && npm run compile"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-ignition": "^3.0.3",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
     "@types/dotenv": "^6.1.1",
     "@types/node": "^22.18.8",
     "dotenv": "^17.2.3",
-    "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.0.6",
     "rimraf": "^6.0.1",
     "ts-node": "^10.9.2",
@@ -26,7 +24,6 @@
     "viem": "^2.37.9"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^4.9.6",
-    "@safe-global/protocol-kit": "^6.1.2"
+    "@openzeppelin/contracts": "^4.9.6"
   }
 }
