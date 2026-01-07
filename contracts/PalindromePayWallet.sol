@@ -40,7 +40,7 @@ interface IPalindromePay {
         view
         returns (EscrowDeal memory);
 
-    function feeReceiver() external view returns (address);
+    function FEE_RECEIVER() external view returns (address);
 }
 
 /**
@@ -367,7 +367,7 @@ contract PalindromePayWallet is ReentrancyGuard {
             // Seller receives payment minus fee
             recipient = deal.seller;
 
-            address feeTo = escrow.feeReceiver();
+            address feeTo = escrow.FEE_RECEIVER();
             if (feeTo == address(0)) revert FeeReceiverZero();
 
             (netAmount, feeAmount) = _computeFeeAndNet(balance, deal.tokenDecimals);

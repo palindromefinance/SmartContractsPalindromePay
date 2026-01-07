@@ -10,7 +10,7 @@
     "deployBSCTest": "ts-node scripts/deployBSCTest.ts",
     "reset": "npm run clean && npm run compile",
     "forge:clean": "rimraf cache out",
-    "forge:build": "npm run forge:clean && forge build -q"
+    "forge:build": "npm run forge:clean && forge build 2>&1 | grep -v 'note\\[' | grep -v '^\\s*-->' | grep -v '^\\s*|' | grep -v 'help:'"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.0.3",
