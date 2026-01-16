@@ -1790,16 +1790,24 @@ test('Security: Only seller can call autoRelease', async () => {
 // SCENARIO 7: CANCEL BY TIMEOUT - EDGE CASES
 // ════════════════════════════════════════════════════════════════════════════
 
-test('Scenario 7A: cancelByTimeout fails without arbiter', async () => {
-    console.log('\n📋 SCENARIO 7A: cancelByTimeout fails without arbiter');
-    console.log('   Flow: Create escrow with zero arbiter → Deposit → Request cancel → Timeout cancel fails');
+test('Scenario 7A: Zero address arbiter uses DEFAULT_ARBITER', async () => {
+    console.log('\n📋 SCENARIO 7A: Zero address arbiter uses DEFAULT_ARBITER');
+    console.log('   Flow: Create escrow with zero arbiter → Verify DEFAULT_ARBITER is used');
 
     await fundAndApprove(buyerClient, buyer.address);
 
     const escrowId = await getNextEscrowId();
     const predictedWallet = computePredictedWallet(escrowId);
 
-    // Seller creates escrow WITHOUT arbiter (zero address)
+    // Get DEFAULT_ARBITER from contract
+    const defaultArbiter = await publicClient.readContract({
+        address: escrowAddress,
+        abi: escrowAbi,
+        functionName: 'DEFAULT_ARBITER',
+    });
+    console.log(`   DEFAULT_ARBITER: ${defaultArbiter}`);
+
+    // Seller creates escrow with zero address arbiter
     const sellerSig = await signWalletAuthorization(
         sellerClient,
         seller.address,
@@ -1816,72 +1824,22 @@ test('Scenario 7A: cancelByTimeout fails without arbiter', async () => {
             buyer.address,
             AMOUNT,
             1n,
-            '0x0000000000000000000000000000000000000000', // No arbiter
-            'No Arbiter Escrow',
-            'QmNoArbiter',
+            '0x0000000000000000000000000000000000000000', // Zero address - should use DEFAULT_ARBITER
+            'Default Arbiter Escrow',
+            'QmDefaultArbiter',
             sellerSig,
         ],
     });
 
-    const deal0 = await getDeal(escrowId);
+    const deal = await getDeal(escrowId);
 
-    // Buyer deposits
-    const buyerSig = await signWalletAuthorization(
-        buyerClient,
-        buyer.address,
-        deal0.wallet,
-        escrowId,
+    // Verify DEFAULT_ARBITER was used
+    assert.equal(
+        deal.arbiter.toLowerCase(),
+        (defaultArbiter as string).toLowerCase(),
+        'Should use DEFAULT_ARBITER when zero address is passed'
     );
-
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'deposit',
-        args: [BigInt(escrowId), buyerSig],
-    });
-
-    // Buyer requests cancel
-    await buyerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'requestCancel',
-        args: [BigInt(escrowId), buyerSig],
-    });
-
-    // Fast forward past maturity + grace period
-    const GRACE_PERIOD = 24 * 60 * 60;
-    const ONE_DAY = 24 * 60 * 60;
-    await increaseTime(ONE_DAY + GRACE_PERIOD + 100);
-
-    // Buyer tries cancelByTimeout - should fail because no arbiter
-    try {
-        await buyerClient.writeContract({
-            address: escrowAddress,
-            abi: escrowAbi,
-            functionName: 'cancelByTimeout',
-            args: [BigInt(escrowId)],
-        });
-        assert.fail('Should have reverted - no arbiter');
-    } catch (error: any) {
-        assert.ok(
-            error.message.includes('Arbiter required') ||
-            error.message.includes('revert'),
-            'Should revert with Arbiter required'
-        );
-        console.log('   ✅ cancelByTimeout correctly blocked without arbiter');
-    }
-
-    // However, mutual cancel should still work
-    await sellerClient.writeContract({
-        address: escrowAddress,
-        abi: escrowAbi,
-        functionName: 'requestCancel',
-        args: [BigInt(escrowId), sellerSig],
-    });
-
-    const deal1 = await getDeal(escrowId);
-    assert.equal(deal1.state, State.CANCELED, 'Mutual cancel should work');
-    console.log('   ✅ Mutual cancel still works without arbiter');
+    console.log(`   ✅ Escrow arbiter set to DEFAULT_ARBITER: ${deal.arbiter}`);
     console.log('   ✅ SCENARIO 7A PASSED\n');
 });
 
@@ -2342,7 +2300,7 @@ test('Summary', async () => {
     console.log('  ✅ Scenario 6A: Auto-Release (seller claims after grace period)');
     console.log('  ✅ Scenario 6B: Auto-Release blocked by cancel request');
     console.log('  ✅ Scenario 6C: Auto-Release blocked by dispute');
-    console.log('  ✅ Scenario 7A: cancelByTimeout fails without arbiter');
+    console.log('  ✅ Scenario 7A: Zero address arbiter uses DEFAULT_ARBITER');
     console.log('  ✅ Scenario 7B: cancelByTimeout requires requestCancel first');
     console.log('  ✅ Scenario 8: Direct confirmDelivery (non-gasless)');
     console.log('  ✅ Scenario 10: Minimum 1 day maturity requirement');
@@ -2355,6 +2313,6 @@ test('Summary', async () => {
     console.log('═══════════════════════════════════════════════════════════════');
     console.log('  📝 Meta-transactions tested: confirmDeliverySigned, startDisputeSigned');
     console.log('  📝 Timeout mechanisms tested: cancelByTimeout, autoRelease');
-    console.log('  📝 Edge cases tested: no arbiter, min 1 day maturity, replay attacks');
+    console.log('  📝 Edge cases tested: default arbiter, min 1 day maturity, replay attacks');
     console.log('═══════════════════════════════════════════════════════════════\n');
 });

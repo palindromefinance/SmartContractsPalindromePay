@@ -52,6 +52,9 @@ contract PalindromePay is ReentrancyGuard {
     /// @dev Basis points denominator (100% = 10,000 bps)
     uint256 private constant BPS_DENOMINATOR = 10_000;
 
+    /// @notice Default arbiter address (Palindrome Pay)
+    address public constant DEFAULT_ARBITER = 0xa40F8e46c74d04355924D600b6f999DAaEda3AfD;
+
     /// @dev Maximum length for title and IPFS hash strings
     uint256 private constant MAX_STRING_LENGTH = 500;
 
@@ -852,7 +855,9 @@ contract PalindromePay is ReentrancyGuard {
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
         require(amount >= minimumAmount, "Amount too small");
 
-        require(arbiter != msg.sender && arbiter != buyer, "Invalid arbiter");
+        // Use default arbiter if zero address provided
+        address effectiveArbiter = arbiter == address(0) ? DEFAULT_ARBITER : arbiter;
+        require(effectiveArbiter != msg.sender && effectiveArbiter != buyer, "Invalid arbiter");
 
         uint256 escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -868,7 +873,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.token = token;
         deal.buyer = buyer;
         deal.seller = msg.sender;
-        deal.arbiter = arbiter;
+        deal.arbiter = effectiveArbiter;
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
@@ -884,7 +889,7 @@ contract PalindromePay is ReentrancyGuard {
             msg.sender,
             token,
             amount,
-            arbiter,
+            effectiveArbiter,
             deal.maturityTime,
             title,
             ipfsHash
@@ -929,7 +934,9 @@ contract PalindromePay is ReentrancyGuard {
         uint256 minimumAmount = _calculateMinimumAmount(decimals);
         require(amount >= minimumAmount, "Amount too small");
 
-        require(arbiter != msg.sender && arbiter != seller, "Invalid arbiter");
+        // Use default arbiter if zero address provided
+        address effectiveArbiter = arbiter == address(0) ? DEFAULT_ARBITER : arbiter;
+        require(effectiveArbiter != msg.sender && effectiveArbiter != seller, "Invalid arbiter");
 
         escrowId = nextEscrowId++;
         address predictedWallet = _predictWalletAddress(escrowId);
@@ -945,7 +952,7 @@ contract PalindromePay is ReentrancyGuard {
         deal.token = token;
         deal.buyer = msg.sender;
         deal.seller = seller;
-        deal.arbiter = arbiter;
+        deal.arbiter = effectiveArbiter;
         deal.wallet = walletAddr;
         deal.amount = amount;
         require(maturityTimeDays >= 1, "Min 1 day maturity");
@@ -961,7 +968,7 @@ contract PalindromePay is ReentrancyGuard {
             seller,
             token,
             amount,
-            arbiter,
+            effectiveArbiter,
             deal.maturityTime,
             title,
             ipfsHash
